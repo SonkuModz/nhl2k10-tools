@@ -45,28 +45,66 @@ All multi-byte fields in the RIFF wrapper are **little-endian** even though the
 packets themselves are big-endian — the wrapper is a PC-side container, the
 payload is console data. Decode the result with ffmpeg's `xma2` decoder.
 
-### Two fields the bitstream does not carry
+### Two fields the bitstream does not carry — both now located
 
-**Channel count** is not recoverable from the stream. Probe it: attempt the decode
-as stereo, and if the decoder rejects the stream, fall back to mono. Most files in
-this game are mono.
+**Sample rate** is absent from XMA2 itself. It lives in the **sound banks** (see
+below), at `+0x10` of each record. This game uses four different rates, so
+guessing 48 kHz is wrong about as often as it is right.
 
-**Sample rate** is likewise absent — XMA2 stores no rate in the bitstream. It
-lives in sound-bank metadata that has not been located. 48000 Hz is the right
-default; a wrong value changes playback speed and pitch but never whether the
-stream decodes, so it is safe to experiment.
+**Channel count** is not in the bank record either — that field reads 2 for every
+entry, including mono ones. Read it from the stream: **byte 7 of the first packet
+is `0x03` for mono**. Decoding a mono stream as stereo yields ~0.009 s of noise,
+which is a useful failure signature.
+
+## Sound banks — `sfx_arena###.bnk`
+
+Four banks, 288 sounds each, ~44 minutes apiece. A bank is one archive entry laid
+out as:
+
+```
+[ FF3BEF94 package -> 44-byte record table ][ raw XMA2 payload ]
+```
+
+The table decompresses to exactly `44 * n` bytes with no header, and the payload
+begins immediately after the compressed package. Sounds are stored **contiguously
+in record order**, so a sound's offset is the running sum of the preceding sizes —
+there is no offset field. Confirmed arithmetically: for `sfx_arena000.bnk` the
+sizes sum to 16,068,608 and the payload region is exactly that long.
+
+```
++0x00  u32  version/type      always 1
++0x04  u32  codec id          always 5 (XMA2)
++0x08  u32  unknown           always 2 -- NOT the channel count
++0x0C  u32  SAMPLE COUNT      duration = this / sample_rate
++0x10  u32  SAMPLE RATE       48000 / 44100 / 22050 / 16000
++0x14  u32  reserved (0)
++0x18  u32  SIZE in bytes     0x800-aligned
++0x1C  u32  reserved (0)
++0x20  u32  flags             0x20
++0x24  u32  unknown           ~2.9x the sample count; not a duration
++0x28  u32  loop/flags
+```
+
+Verified end to end: record 0 declares 31,856 samples at 48 kHz = 0.664 s, and
+ffmpeg decodes exactly 0.664 s. All six sounds tested match to the millisecond.
+
+> Two fields are easy to misread. The sample count is at **`+0x0C`**, not `+0x24`
+> (`+0x24` predicts 1.93 s for that same sound and matches nothing), and `+0x08`
+> is not the channel count. Both were got wrong on the first pass here.
 
 Validated on file #2277: 2 minutes 28 seconds of clean mono audio, mean level
 −11.8 dB.
 
 ## Replacing audio — read this before trying
 
-**You cannot convert a WAV to XMA2**, with these findings or any free tool. No
-XMA2 encoder exists outside the Xbox 360 XDK; ffmpeg *decodes* XMA but cannot
-produce it. Any workflow that starts from PCM is blocked at that step.
+**No free software encodes XMA2.** ffmpeg *decodes* XMA but cannot produce it.
+The only encoder is **`xma2encode.exe`** from the Xbox 360 XDK, which cannot be
+redistributed — so a PCM-to-XMA2 workflow requires the user to supply that binary
+themselves. With it in hand the pipeline is: source audio → ffmpeg → WAV →
+`xma2encode.exe` → XMA2 → check it fits → patch.
 
-What does work is substituting a stream that is *already* XMA2 — another clip
-from the game, or output from an XDK-based encoder. The constraints:
+Without it, you can still substitute a stream that is *already* XMA2 — another
+clip from the game works. Either way the constraints are:
 
 * The replacement must be whole 2048-byte packets.
 * It must fit the original file's slot in the archive; pad the remainder rather

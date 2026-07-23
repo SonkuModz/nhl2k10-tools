@@ -404,22 +404,56 @@ def extract_textures(data, bounds):
             results.append((d, kind, hdr + linear[:size]))
     return results, pixel_base
 
-def main():
-    iso = sys.argv[1]; idx = int(sys.argv[2])
-    outdir = sys.argv[3] if len(sys.argv) > 3 else "extracted/textures"
-    os.makedirs(outdir, exist_ok=True)
-    arc = Archive(iso)
+def dump_file(arc, idx, root, asset=""):
+    """Extract one archive file's textures into an organised subfolder."""
     raw = arc.read_file(arc.files[idx])
+    if raw[:4] not in (bytes.fromhex("ff3bef94"), bytes.fromhex("0e4837c3")):
+        return 0, None
     data, bounds = decompress_with_bounds(raw)
-    res, pbase = extract_textures(data, bounds)
-    print(f"file#{idx}: {len(res)} textures, pixel_base=0x{pbase:X}, "
-          f"{len(bounds)} sub-resources")
-    for d, fourcc, dds_bytes in res:
-        pos = d["base"] + d["off"] - bounds[-1][0]     # absolute within the resource
-        name = f"{idx}_{pos:07X}_{d['w']}x{d['h']}_{fourcc}.dds"
-        with open(os.path.join(outdir, name), "wb") as f:
+    res, _pbase = extract_textures(data, bounds)
+    if not res:
+        return 0, None
+    try:
+        import names as _names
+        sub = _names.output_dir(root, idx, asset)
+    except Exception:
+        sub = os.path.join(root, "%05d" % idx)
+    os.makedirs(sub, exist_ok=True)
+    for n, (d, fourcc, dds_bytes) in enumerate(res):
+        pos = d["base"] + d["off"] - bounds[-1][0]   # absolute within the resource
+        name = f"{n:02d}_{pos:07X}_{d['w']}x{d['h']}_{fourcc}.dds"
+        with open(os.path.join(sub, name), "wb") as f:
             f.write(dds_bytes)
-    print(f"wrote {len(res)} .dds -> {outdir}")
+    return len(res), sub
+
+
+def main():
+    """usage: vc_texture.py <iso> <index|--all> [outdir]"""
+    iso = sys.argv[1]
+    outdir = sys.argv[3] if len(sys.argv) > 3 else "extracted/textures"
+    arc = Archive(iso)
+    try:
+        import names as _names
+        catalog = _names.build_catalog()
+    except Exception:
+        catalog = {}
+    if sys.argv[2] == "--all":
+        idxs = [e.index for e in arc.files]
+    else:
+        idxs = [int(x) for x in sys.argv[2].split(",")]
+    total = 0
+    for idx in idxs:
+        asset = catalog.get(arc.files[idx].crc, "")
+        try:
+            n, sub = dump_file(arc, idx, outdir, asset)
+        except Exception as ex:
+            print(f"  #{idx}: {ex}")
+            continue
+        if n:
+            total += n
+            print(f"  {asset or '#%d' % idx}: {n} textures -> "
+                  f"{os.path.relpath(sub, outdir)}")
+    print(f"wrote {total} .dds -> {outdir}")
 
 if __name__ == "__main__":
     main()

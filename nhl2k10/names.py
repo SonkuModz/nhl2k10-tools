@@ -83,6 +83,49 @@ def build_catalog(codes=None, templates=None):
     return out
 
 
+# Asset name prefix -> output folder. First match wins, so order matters
+# (`uniform_base_` must be tested before `uniform_`).
+CATEGORIES = [
+    ("uniform_base_", "jerseys/base"),
+    ("uniform_", "jerseys/overlay"),
+    ("logo_", "logos"),
+    ("rink_", "rinks"),
+    ("ice_", "rinks/postseason"),
+    ("arena_", "arenas"),
+    ("led_", "arenas/led"),
+    ("zamboni_team_", "zamboni"),
+    ("zamboni_", "zamboni"),
+]
+
+
+def category(name):
+    """Folder an asset's textures belong in."""
+    if not name:
+        return "unnamed"
+    for prefix, folder in CATEGORIES:
+        if name.startswith(prefix):
+            return folder
+    return "other"
+
+
+def output_dir(root, index, name):
+    """Where one archive file's textures should be written.
+
+    Dumping thousands of .dds into a single folder is unusable, so lay them out
+    by what the asset actually is:
+
+        textures/jerseys/overlay/uniform_cgy_home/...
+        textures/arenas/arena_nyr/...
+        textures/unnamed/01234/...
+
+    Unnamed entries fall back to their archive index, which is still stable and
+    still groups a file's textures together.
+    """
+    stem = (name[:-4] if name.lower().endswith(".iff") else name) if name else ""
+    leaf = stem or "%05d" % index
+    return os.path.join(root, category(name), leaf)
+
+
 def resolve(arc, name):
     """Find the archive entry for `name`, or None."""
     h = name_hash(name)

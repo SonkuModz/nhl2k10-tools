@@ -505,8 +505,8 @@ class ExtractorGUI:
         self._start_worker(self._do_textures, idxs)
 
     def _do_textures(self, idxs):
-        d = os.path.join(self._outdir(), "textures")
-        os.makedirs(d, exist_ok=True)
+        root = os.path.join(self._outdir(), "textures")
+        os.makedirs(root, exist_ok=True)
         total = 0
         for idx in idxs:
             e = self.arc.files[idx]
@@ -518,19 +518,26 @@ class ExtractorGUI:
                 res, pbase = vc_texture.extract_textures(dec, bounds)
             except Exception:
                 res = []
-            for desc, fourcc, dds_bytes in res:
+            asset = self.names.get(e.crc, "")
+            sub = (asset_names.output_dir(root, idx, asset) if asset_names
+                   else os.path.join(root, "%05d" % idx))
+            if res:
+                os.makedirs(sub, exist_ok=True)
+            for n, (desc, fourcc, dds_bytes) in enumerate(res):
                 # Name by the offset within the pixel resource, not the
                 # group-relative one -- offsets restart per group, so the
                 # relative value collides between textures in the same file.
                 pos = desc["base"] + desc["off"] - bounds[-1][0]
-                name = "%05d_%07X_%dx%d_%s.dds" % (idx, pos, desc["w"],
+                name = "%02d_%07X_%dx%d_%s.dds" % (n, pos, desc["w"],
                                                    desc["h"], fourcc)
-                with open(os.path.join(d, name), "wb") as f:
+                with open(os.path.join(sub, name), "wb") as f:
                     f.write(dds_bytes)
                 total += 1
             if res:
-                self.q.put(("log", "  #%d: %d textures" % (idx, len(res))))
-        self.q.put(("log", "Textures done: %d .dds files -> %s" % (total, d)))
+                self.q.put(("log", "  %s: %d textures -> %s"
+                            % (asset or "#%d" % idx, len(res),
+                               os.path.relpath(sub, root))))
+        self.q.put(("log", "Textures done: %d .dds files -> %s" % (total, root)))
 
     def _extract_wav(self):
         sel = self.tree.selection()

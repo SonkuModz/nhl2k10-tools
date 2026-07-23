@@ -1,0 +1,11 @@
+# Core — needed for texture extraction and replacement
+reversebox>=0.9.0      # verified Xbox 360 tiling/untiling (XGAddress2DTiledOffset)
+numpy>=1.24            # block codecs, mip generation, verification
+pillow>=10.0           # image loading/saving for previews and replacements
+
+# The GUI uses tkinter, which ships with CPython on Windows and macOS.
+# On Debian/Ubuntu: sudo apt install python3-tk
+#
+# Audio decoding (Audio -> WAV) shells out to ffmpeg, which must be on PATH:
+#   https://ffmpeg.org/download.html
+# Extraction of textures and archives works without it.

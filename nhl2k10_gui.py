@@ -1,57 +1,60 @@
 #!/usr/bin/env python3
 """
-NHL 2K10 (Xbox 360) Asset Extractor -- GUI
+nhl2k10_gui.py -- NHL 2K10 modding toolkit.
 
-A tkinter front-end over the reverse-engineered pipeline:
-  ISO (XDVDFS) -> AA00B3BF archive -> FF3BEF94/0E4837C3 (VC LZSS) blocks.
+Tabbed UI over the `nhl2k10/` library: browse the archive by asset name, extract
+and replace textures and audio, and edit team colours in a roster save.
 
-Features:
-  * Open a NHL 2K10 .iso, list all 2407 archived files (type, sizes, hash).
-  * Extract the top-level ISO "base files" (0A/0B/1A/1B/default.xex/nxeart).
-  * Extract archived files RAW (as stored) or DECOMPRESSED (VC LZSS decoded).
-  * Multi-select + filter, background worker thread, progress + log.
-
-Pure standard library (tkinter). Reuses tools/: xdvdfs, nhl2k_arc, vc_decomp,
-vc_extract.
+The tab layout mirrors the NHL 2K10 Mod Launcher so the two are navigable side by
+side. Tabs needing a capability this toolkit does not have (attaching to a running
+game's memory) say so plainly rather than showing controls that do nothing.
 """
 import os
-import sys
-import struct
-import threading
 import queue
+import shutil
+import sys
+import threading
 import traceback
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "nhl2k10"))
 
-import xdvdfs
 from nhl2k_arc import Archive
-import vc_decomp
-import vc_extract
 import vc_texture
 import xma_extract
-import shutil
+
 try:
-    import names as asset_names          # CRC-32(NAME.UPPER()) -> readable name
+    import names as asset_names
 except Exception:
     asset_names = None
 try:
-    import vc_write                     # write-back; needs numpy + Pillow
+    import sound_bank
+except Exception:
+    sound_bank = None
+try:
+    import roster as roster_mod
+except Exception:
+    roster_mod = None
+try:
+    import vc_write
     HAS_WRITE = True
 except Exception:
     HAS_WRITE = False
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
-def _find_iso():
-    """Locate the user's own disc image.
+IFF_MAGIC = bytes.fromhex("ff3bef94")
+BLOCK_MAGIC = bytes.fromhex("0e4837c3")
+XMA_MAGIC = bytes.fromhex("08000000")
+MANIFEST_MAGIC = bytes.fromhex("e4791207")
+UNCOMPRESSED_MAGIC = bytes.fromhex("f0985030")
 
-    No game data ships with this tool — you supply your own legally obtained
-    copy. Checked in order: the NHL2K10_ISO environment variable, then any .iso
-    sitting next to this script (largest first, since the game image is big).
-    """
+
+def find_iso():
+    """Locate the user's own disc image. No game data ships with this tool."""
     env = os.environ.get("NHL2K10_ISO")
     if env and os.path.isfile(env):
         return env
@@ -66,227 +69,677 @@ def _find_iso():
     return ""
 
 
-DEFAULT_ISO = _find_iso()
+def classify(head):
+    h = head[:4]
+    if h == IFF_MAGIC:
+        return "IFF (compressed)"
+    if h == BLOCK_MAGIC:
+        return "IFF block"
+    if h == XMA_MAGIC:
+        return "XMA2 audio"
+    if h == MANIFEST_MAGIC:
+        return "manifest"
+    if h == UNCOMPRESSED_MAGIC:
+        return "IFF (uncompressed)"
+    return "other"
 
 
 def _choose(parent, title, prompt, choices):
-    """Modal list picker. Returns the chosen index, or None if cancelled."""
+    """Modal list picker -> chosen index, or None."""
     win = tk.Toplevel(parent)
     win.title(title)
     win.transient(parent)
     win.grab_set()
     ttk.Label(win, text=prompt, padding=8).pack(anchor="w")
-    lb = tk.Listbox(win, width=52, height=min(18, max(4, len(choices))))
+    lb = tk.Listbox(win, width=52, height=min(18, max(3, len(choices))))
     for c in choices:
         lb.insert("end", c)
     lb.selection_set(0)
     lb.pack(fill="both", expand=True, padx=8)
-    result = {"i": None}
+    res = {"i": None}
 
     def ok(*_a):
-        sel = lb.curselection()
-        result["i"] = sel[0] if sel else None
+        s = lb.curselection()
+        res["i"] = s[0] if s else None
         win.destroy()
 
-    btns = ttk.Frame(win, padding=8)
-    btns.pack(fill="x")
-    ttk.Button(btns, text="OK", command=ok).pack(side="right")
-    ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=6)
+    bf = ttk.Frame(win, padding=8)
+    bf.pack(fill="x")
+    ttk.Button(bf, text="OK", command=ok).pack(side="right")
+    ttk.Button(bf, text="Cancel", command=win.destroy).pack(side="right", padx=6)
     lb.bind("<Double-Button-1>", ok)
     win.wait_window()
-    return result["i"]
+    return res["i"]
 
 
-def classify(head):
-    """Short type label + suggested extension from the first bytes."""
-    m = head[:4]
-    if m == b"\xff\x3b\xef\x94":
-        return "IFF (compressed)", "iff"
-    if m == b"\x0e\x48\x37\xc3":
-        return "0E4837C3 block", "iff"
-    if m == b"\x08\x00\x00\x00":
-        return "XMA audio", "xma"
-    if m == b"\x02\x00\x01\x00":
-        return "data table (LE)", "bin"
-    if m == b"\xe4\x79\x12\x07":
-        return "IFF manifest", "iff"
-    if m == b"\xf0\x98\x50\x30":
-        return "IFF (uncompressed)", "iff"
-    if m == b"\x00\x06\xf0\x00":
-        return "font/loc package", "bin"
-    if m[:3] == b"\x00\x00\x00" or m == b"\x00\x00\x00\x01":
-        return "data", "bin"
-    return "unknown", "bin"
-
-
-class ExtractorGUI:
+class App(object):
     def __init__(self, root):
         self.root = root
-        root.title("NHL 2K10 (Xbox 360) Asset Extractor")
-        root.geometry("1000x680")
+        root.title("NHL 2K10 Modding Toolkit")
+        root.geometry("1180x780")
+
         self.arc = None
-        self.rows = []            # (entry, type_label, ext)
-        # name_hash -> readable asset name, for entries we can identify
+        self.rows = []
+        self.banks = []
+        self.roster = None
         self.names = asset_names.build_catalog() if asset_names else {}
         self.q = queue.Queue()
         self.worker = None
+
+        self.iso_var = tk.StringVar(value=find_iso())
+        self.out_var = tk.StringVar(value=os.path.join(HERE, "extracted"))
+        self.ros_var = tk.StringVar()
+        self.xma_enc_var = tk.StringVar(value=shutil.which("xma2encode") or "")
+
         self._build()
         self.root.after(100, self._poll)
-        if os.path.exists(DEFAULT_ISO):
-            self.iso_var.set(DEFAULT_ISO)
+        if self.iso_var.get():
+            self._load()
 
-    # ---------- UI ----------
+    # ================= layout =================
     def _build(self):
-        top = ttk.Frame(self.root, padding=6)
+        top = ttk.Frame(self.root, padding=(8, 6))
         top.pack(fill="x")
-        ttk.Label(top, text="ISO:").pack(side="left")
-        self.iso_var = tk.StringVar()
+        ttk.Label(top, text="Disc image:").pack(side="left")
         ttk.Entry(top, textvariable=self.iso_var).pack(side="left", fill="x",
-                                                       expand=True, padx=4)
+                                                       expand=True, padx=6)
         ttk.Button(top, text="Browse", command=self._browse_iso).pack(side="left")
         ttk.Button(top, text="Load", command=self._load).pack(side="left", padx=4)
+        self.status_var = tk.StringVar(value="No disc image loaded")
+        ttk.Label(top, textvariable=self.status_var).pack(side="right")
 
-        out = ttk.Frame(self.root, padding=(6, 0))
-        out.pack(fill="x")
-        ttk.Label(out, text="Output folder:").pack(side="left")
-        self.out_var = tk.StringVar(value=os.path.join(HERE, "extracted"))
-        ttk.Entry(out, textvariable=self.out_var).pack(side="left", fill="x",
-                                                       expand=True, padx=4)
-        ttk.Button(out, text="Browse", command=self._browse_out).pack(side="left")
+        pane = ttk.PanedWindow(self.root, orient="vertical")
+        pane.pack(fill="both", expand=True, padx=8, pady=4)
 
-        # base files row
-        base = ttk.LabelFrame(self.root, text="ISO base files", padding=6)
-        base.pack(fill="x", padx=6, pady=4)
-        ttk.Button(base, text="Extract base files (0A/0B/1A/1B/default.xex/nxeart)",
-                   command=self._extract_base).pack(side="left")
-        ttk.Label(base, text="  (raw split archives + executable)").pack(side="left")
+        nbf = ttk.Frame(pane)
+        self.nb = ttk.Notebook(nbf)
+        self.nb.pack(fill="both", expand=True)
+        pane.add(nbf, weight=4)
 
-        # filter
-        filt = ttk.Frame(self.root, padding=(6, 0))
-        filt.pack(fill="x")
-        ttk.Label(filt, text="Filter type:").pack(side="left")
-        self.filter_var = tk.StringVar()
-        fe = ttk.Entry(filt, textvariable=self.filter_var, width=24)
-        fe.pack(side="left", padx=4)
-        fe.bind("<KeyRelease>", lambda e: self._refill_tree())
-        self.mode_var = tk.StringVar(value="decompressed")
-        ttk.Radiobutton(filt, text="Decompressed", value="decompressed",
-                        variable=self.mode_var).pack(side="left", padx=(16, 2))
-        ttk.Radiobutton(filt, text="Raw", value="raw",
-                        variable=self.mode_var).pack(side="left")
+        self.tab_audio = ttk.Frame(self.nb, padding=8)
+        self.tab_iff = ttk.Frame(self.nb, padding=8)
+        self.tab_teams = ttk.Frame(self.nb, padding=8)
+        self.tab_goalie = ttk.Frame(self.nb, padding=8)
+        self.tab_portrait = ttk.Frame(self.nb, padding=8)
+        self.tab_scorebug = ttk.Frame(self.nb, padding=8)
+        self.tab_settings = ttk.Frame(self.nb, padding=8)
+        for t, label in ((self.tab_audio, "  Audio  "),
+                         (self.tab_iff, "  IFF Textures  "),
+                         (self.tab_teams, "  Teams  "),
+                         (self.tab_goalie, "  Goalie Equipment  "),
+                         (self.tab_portrait, "  Portraits  "),
+                         (self.tab_scorebug, "  Scoreclock  "),
+                         (self.tab_settings, "  Settings  ")):
+            self.nb.add(t, text=label)
 
-        # tree
-        cols = ("idx", "name", "type", "csize", "dsize", "hash", "offset")
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings",
-                                 selectmode="extended")
-        headers = {"idx": ("#", 60), "name": ("Name", 190),
-                   "type": ("Type", 150), "csize": ("Stored", 100),
-                   "dsize": ("Decompressed", 110), "hash": ("Name hash", 110),
-                   "offset": ("Stream offset", 120)}
-        for c in cols:
-            t, w = headers[c]
-            self.tree.heading(c, text=t)
-            self.tree.column(c, width=w, anchor="w")
-        vsb = ttk.Scrollbar(self.root, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="top", fill="both", expand=True, padx=6)
-        vsb.place(in_=self.tree, relx=1.0, rely=0, relheight=1.0, anchor="ne")
+        logf = ttk.LabelFrame(pane, text="Log", padding=4)
+        self.prog = ttk.Progressbar(logf, mode="determinate")
+        self.prog.pack(fill="x", pady=(0, 3))
+        self.log = tk.Text(logf, height=8, wrap="none")
+        self.log.pack(fill="both", expand=True)
+        pane.add(logf, weight=1)
 
-        # action buttons
-        act = ttk.Frame(self.root, padding=6)
-        act.pack(fill="x")
-        ttk.Button(act, text="Extract selected", command=self._extract_selected).pack(side="left")
-        ttk.Button(act, text="Extract ALL", command=self._extract_all).pack(side="left", padx=6)
-        ttk.Separator(act, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(act, text="Textures → DDS",
-                   command=self._extract_textures).pack(side="left")
-        wavbtn = ttk.Button(act, text="Audio → WAV", command=self._extract_wav)
-        wavbtn.pack(side="left", padx=6)
+        self._build_audio()
+        self._build_iff()
+        self._build_teams()
+        self._build_live_tab(
+            self.tab_goalie, "Goalie Equipment",
+            "Goalie masks are selected by two bit-fields in the loaded player "
+            "struct:\n\n"
+            "    shell   = (*(u32*)(player + 0xB4) >> 23) & 0xF\n"
+            "    pattern =  *(u32*)(player + 0xB8)        & 0x1F\n\n"
+            "In the Roster.ROS file the same value sits inside a per-save "
+            "scrambled and checksummed field at +0x118, so it cannot be edited "
+            "cleanly on disk. Assigning a mask means writing those two fields in "
+            "the running game.")
+        self._build_live_tab(
+            self.tab_portrait, "Portraits",
+            "A player's portrait is chosen by the u16 at player_record + 0x1C. "
+            "The game formats an asset name \"%04d_image\" from that key, hashes "
+            "it, and matches the result against a portrait blob header.\n\n"
+            "On disk the roster stores players in a different, mostly-empty "
+            "layout where the key is not plainly at +0x1C, so reassigning a "
+            "portrait means writing that u16 in the running game.")
+        self._build_scorebug()
+        self._build_settings()
+
+    # ---------------- Audio ----------------
+    def _build_audio(self):
+        t = self.tab_audio
+        bar = ttk.Frame(t)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="Sound bank:").pack(side="left")
+        self.bank_var = tk.StringVar()
+        self.bank_cb = ttk.Combobox(bar, textvariable=self.bank_var, width=26,
+                                    state="readonly")
+        self.bank_cb.pack(side="left", padx=6)
+        self.bank_cb.bind("<<ComboboxSelected>>", lambda e: self._fill_sounds())
+        ttk.Button(bar, text="Extract selected",
+                   command=self._extract_sounds).pack(side="left", padx=4)
+        ttk.Button(bar, text="Extract whole bank",
+                   command=lambda: self._extract_sounds(all_of=True)).pack(side="left")
         if not HAS_FFMPEG:
-            wavbtn.state(["disabled"])
-            ttk.Label(act, text="(ffmpeg not found)").pack(side="left")
-        self.count_var = tk.StringVar(value="No ISO loaded")
-        ttk.Label(act, textvariable=self.count_var).pack(side="right")
+            ttk.Label(bar, text="  ffmpeg not found — decoding disabled",
+                      foreground="#b04").pack(side="left", padx=8)
 
-        # ---- write-back (modding) ----
-        mod = ttk.Frame(self.root, padding=(6, 0, 6, 6))
-        mod.pack(fill="x")
-        ttk.Label(mod, text="Mod:").pack(side="left")
-        ttk.Button(mod, text="Replace texture…",
-                   command=self._replace_texture).pack(side="left", padx=4)
-        ttk.Button(mod, text="Replace audio (.xma)…",
-                   command=self._replace_audio).pack(side="left", padx=4)
-        ttk.Separator(mod, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(mod, text="Revert ALL mods",
-                   command=self._revert_mods).pack(side="left")
-        self.mod_var = tk.StringVar(value="")
-        ttk.Label(mod, textvariable=self.mod_var).pack(side="right")
+        cols = ("idx", "rate", "secs", "size", "offset")
+        self.sound_tree = ttk.Treeview(t, columns=cols, show="headings",
+                                       selectmode="extended")
+        for c, h, w in (("idx", "#", 60), ("rate", "Sample rate", 100),
+                        ("secs", "Seconds", 90), ("size", "Bytes", 100),
+                        ("offset", "Offset in bank", 130)):
+            self.sound_tree.heading(c, text=h)
+            self.sound_tree.column(c, width=w, anchor="w")
+        self.sound_tree.pack(fill="both", expand=True)
+        ttk.Label(t, foreground="#777", wraplength=980, justify="left",
+                  text="Sample rate comes from the bank record — the game uses "
+                       "48000, 44100, 22050 and 16000, so a fixed 48 kHz guess is "
+                       "wrong about half the time. Channel count is read from the "
+                       "stream itself, not the record."
+                  ).pack(anchor="w", pady=(4, 0))
 
-        # progress + log
-        self.prog = ttk.Progressbar(self.root, mode="determinate")
-        self.prog.pack(fill="x", padx=6)
-        self.log = tk.Text(self.root, height=8, wrap="none")
-        self.log.pack(fill="both", padx=6, pady=(2, 6))
+    def _fill_banks(self):
+        if not (sound_bank and self.arc):
+            return
+        try:
+            self.banks = sound_bank.find_banks(self.arc)
+        except Exception:
+            self.banks = []
+        self.bank_cb["values"] = [n for n, _e in self.banks]
+        if self.banks:
+            self.bank_cb.current(0)
+            self._fill_sounds()
 
-    # ---------- helpers ----------
-    def _browse_iso(self):
-        p = filedialog.askopenfilename(title="Select NHL 2K10 ISO",
-                                       filetypes=[("ISO", "*.iso"), ("All", "*.*")])
+    def _fill_sounds(self):
+        self.sound_tree.delete(*self.sound_tree.get_children())
+        entry = dict(self.banks).get(self.bank_var.get())
+        if not entry:
+            return
+        try:
+            sounds, _payload = sound_bank.parse_bank(self.arc.read_file(entry))
+        except Exception as ex:
+            self._logln("bank: %s" % ex)
+            return
+        for s in sounds:
+            self.sound_tree.insert("", "end", iid=str(s.index),
+                                   values=(s.index, s.rate, "%.2f" % s.seconds,
+                                           s.size, "0x%X" % s.offset))
+        self._logln("%s: %d sounds" % (self.bank_var.get(), len(sounds)))
+
+    def _extract_sounds(self, all_of=False):
+        if not (self.arc and sound_bank and self.bank_var.get()):
+            return
+        if not HAS_FFMPEG:
+            messagebox.showerror("ffmpeg required",
+                                 "Decoding XMA2 needs ffmpeg on PATH.")
+            return
+        sel = None if all_of else [int(i) for i in self.sound_tree.selection()]
+        if not all_of and not sel:
+            messagebox.showinfo("Select sounds", "Pick one or more sounds first.")
+            return
+        self._start(self._do_extract_sounds, self.bank_var.get(), sel)
+
+    def _do_extract_sounds(self, name, sel):
+        entry = dict(self.banks)[name]
+        raw = self.arc.read_file(entry)
+        sounds, payload = sound_bank.parse_bank(raw)
+        d = os.path.join(self._outdir(), "audio", name.rsplit(".", 1)[0])
+        os.makedirs(d, exist_ok=True)
+        want = sounds if sel is None else [s for s in sounds if s.index in sel]
+        self.q.put(("progmax", len(want)))
+        done = 0
+        for n, s in enumerate(want):
+            data = sound_bank.read_sound(raw, s, payload)
+            if len(data) >= sound_bank.PACKET:
+                ch = sound_bank.stream_channels(data)
+                wav = os.path.join(d, "%03d_%dHz_%dch_%.2fs.wav"
+                                   % (s.index, s.rate, ch, s.seconds))
+                try:
+                    xma_extract.extract_to_wav(data, wav, rate=s.rate, channels=ch)
+                    done += 1
+                except Exception:
+                    pass
+            self.q.put(("prog", n + 1))
+        self._logln("decoded %d/%d sounds -> %s" % (done, len(want), d))
+
+    # ---------------- IFF Textures ----------------
+    def _build_iff(self):
+        t = self.tab_iff
+        bar = ttk.Frame(t)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="Filter:").pack(side="left")
+        self.filter_var = tk.StringVar()
+        e = ttk.Entry(bar, textvariable=self.filter_var, width=24)
+        e.pack(side="left", padx=6)
+        e.bind("<KeyRelease>", lambda ev: self._refill())
+        ttk.Button(bar, text="Extract textures",
+                   command=self._extract_textures).pack(side="left", padx=4)
+        ttk.Button(bar, text="Extract raw file",
+                   command=self._extract_raw).pack(side="left")
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(bar, text="Replace texture…",
+                   command=self._replace_texture).pack(side="left")
+        ttk.Button(bar, text="Revert all mods",
+                   command=self._revert).pack(side="left", padx=4)
+        self.count_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.count_var).pack(side="right")
+
+        cols = ("idx", "name", "type", "size", "hash")
+        self.tree = ttk.Treeview(t, columns=cols, show="headings",
+                                 selectmode="extended")
+        for c, h, w in (("idx", "#", 60), ("name", "Asset name", 250),
+                        ("type", "Type", 140), ("size", "Bytes", 110),
+                        ("hash", "Name hash", 110)):
+            self.tree.heading(c, text=h)
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill="both", expand=True)
+        ttk.Label(t, foreground="#777", wraplength=980, justify="left",
+                  text="Textures extract into folders by asset type — jerseys/, "
+                       "arenas/, rinks/ — rather than one flat dump. Unnamed "
+                       "entries fall back to their archive index."
+                  ).pack(anchor="w", pady=(4, 0))
+
+    def _refill(self):
+        self.tree.delete(*self.tree.get_children())
+        f = self.filter_var.get().strip().lower()
+        n = 0
+        for e, label in self.rows:
+            nm = self.names.get(e.crc, "")
+            if f and f not in label.lower() and f not in nm.lower() \
+                    and f != str(e.index):
+                continue
+            self.tree.insert("", "end", iid=str(e.index),
+                             values=(e.index, nm, label, e.size, "0x%08X" % e.crc))
+            n += 1
+        self.count_var.set("%d shown / %d total" % (n, len(self.rows)))
+
+    def _selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select a file", "Pick a file in the list first.")
+            return None
+        return [int(s) for s in sel]
+
+    def _extract_textures(self):
+        idxs = self._selected()
+        if idxs:
+            self._start(self._do_textures, idxs)
+
+    def _do_textures(self, idxs):
+        root = os.path.join(self._outdir(), "textures")
+        os.makedirs(root, exist_ok=True)
+        self.q.put(("progmax", len(idxs)))
+        total = 0
+        for n, idx in enumerate(idxs):
+            asset = self.names.get(self.arc.files[idx].crc, "")
+            try:
+                cnt, sub = vc_texture.dump_file(self.arc, idx, root, asset)
+                if cnt:
+                    total += cnt
+                    self._logln("  %s: %d textures -> %s"
+                                % (asset or "#%d" % idx, cnt,
+                                   os.path.relpath(sub, root)))
+            except Exception as ex:
+                self._logln("  #%d: %s" % (idx, ex))
+            self.q.put(("prog", n + 1))
+        self._logln("Done: %d .dds -> %s" % (total, root))
+
+    def _extract_raw(self):
+        idxs = self._selected()
+        if idxs:
+            self._start(self._do_raw, idxs)
+
+    def _do_raw(self, idxs):
+        d = os.path.join(self._outdir(), "raw")
+        os.makedirs(d, exist_ok=True)
+        for idx in idxs:
+            e = self.arc.files[idx]
+            nm = self.names.get(e.crc, "") or ("%05d.bin" % idx)
+            raw = self.arc.read_file(e)
+            with open(os.path.join(d, nm), "wb") as f:
+                f.write(raw)
+            self._logln("  wrote %s (%d bytes)" % (nm, len(raw)))
+
+    def _replace_texture(self):
+        if not HAS_WRITE:
+            messagebox.showerror("Unavailable",
+                                 "Replacing needs numpy and Pillow:\n\n"
+                                 "    pip install numpy pillow")
+            return
+        idxs = self._selected()
+        if not idxs:
+            return
+        idx = idxs[0]
+        try:
+            raw = self.arc.read_file(self.arc.files[idx])
+            dec, bounds = vc_texture.decompress_with_bounds(raw)
+            descs = vc_texture.describe_textures(dec, bounds)
+        except Exception as ex:
+            messagebox.showerror("Cannot read", str(ex))
+            return
+        if not descs:
+            messagebox.showinfo("No textures", "That file holds no textures.")
+            return
+        choices = ["%d: %dx%d %s" % (i, d["w"], d["h"],
+                                     vc_texture.GPU_FMT[d["fmt"]][0])
+                   for i, d in enumerate(descs)]
+        ti = _choose(self.root, "Replace texture", "Which texture?", choices)
+        if ti is None:
+            return
+        d = descs[ti]
+        path = filedialog.askopenfilename(
+            title="Replacement image (must be exactly %dx%d)" % (d["w"], d["h"]),
+            filetypes=[("Images", "*.png *.dds *.tga *.bmp"), ("All", "*.*")])
+        if not path:
+            return
+        if not messagebox.askyesno(
+                "Write to the disc image?",
+                "This edits the image in place.\n\n"
+                "#%d texture %d — %dx%d %s\n%s\n\n"
+                "Every write is journalled, so 'Revert all mods' restores the "
+                "image byte-for-byte. Continue?"
+                % (idx, ti, d["w"], d["h"], vc_texture.GPU_FMT[d["fmt"]][0],
+                   os.path.basename(path))):
+            return
+        self._start(self._do_replace, idx, ti, path)
+
+    def _do_replace(self, idx, ti, path):
+        import numpy as np
+        from PIL import Image
+        img = np.array(Image.open(path).convert("RGBA"))
+        self._logln("Replacing #%d texture %d — recompressing, this can take a "
+                    "while for large assets…" % (idx, ti))
+        info = vc_write.replace_texture(self.iso_var.get(), idx, ti, img)
+        self._logln("  OK  %s %s  %d -> %d bytes (slot %d)"
+                    % (info["dims"], info["format"], info["orig_bytes"],
+                       info["new_bytes"], info["slot"]))
+        self.q.put(("journal", None))
+
+    def _revert(self):
+        if not HAS_WRITE:
+            return
+        try:
+            p = vc_write.Patcher(self.iso_var.get())
+            n = p.pending()
+            p.close()
+        except Exception as ex:
+            messagebox.showerror("Cannot read journal", str(ex))
+            return
+        if not n:
+            messagebox.showinfo("Nothing to revert", "No journalled changes.")
+            return
+        if messagebox.askyesno("Revert", "Restore %d modified region(s)?" % n):
+            self._start(self._do_revert)
+
+    def _do_revert(self):
+        n = vc_write.revert(self.iso_var.get())
+        self._logln("Reverted %d region(s) — image restored exactly." % n)
+        self.q.put(("journal", None))
+
+    # ---------------- Teams ----------------
+    def _build_teams(self):
+        t = self.tab_teams
+        bar = ttk.Frame(t)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="Roster.ROS:").pack(side="left")
+        ttk.Entry(bar, textvariable=self.ros_var).pack(side="left", fill="x",
+                                                       expand=True, padx=6)
+        ttk.Button(bar, text="Browse", command=self._browse_ros).pack(side="left")
+        ttk.Button(bar, text="Load", command=self._load_ros).pack(side="left", padx=4)
+        self.led_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Arena LED colours", variable=self.led_var,
+                        command=self._fill_teams).pack(side="left", padx=8)
+
+        cols = ("code", "primary", "secondary")
+        self.team_tree = ttk.Treeview(t, columns=cols, show="headings", height=16)
+        for c, h, w in (("code", "Team", 90), ("primary", "Primary", 170),
+                        ("secondary", "Secondary", 170)):
+            self.team_tree.heading(c, text=h)
+            self.team_tree.column(c, width=w, anchor="w")
+        self.team_tree.pack(fill="both", expand=True)
+        self.team_tree.bind("<Double-1>", self._edit_team_color)
+
+        ttk.Label(t, foreground="#777", wraplength=980, justify="left",
+                  text="Team colours live in the roster save, not on the disc. "
+                       "Double-click a row to change one. Edits are made in place "
+                       "and never change the file size, so every offset the game "
+                       "holds stays valid; a .colorbak copy is written before the "
+                       "first change. The game caches colours at load, so restart "
+                       "to see them."
+                  ).pack(anchor="w", pady=(6, 0))
+
+    def _browse_ros(self):
+        p = filedialog.askopenfilename(title="Roster save",
+                                       filetypes=[("Roster", "*.ROS"),
+                                                  ("All", "*.*")])
         if p:
-            self.iso_var.set(p)
+            self.ros_var.set(p)
+            self._load_ros()
+
+    def _load_ros(self):
+        if not roster_mod:
+            messagebox.showerror("Unavailable", "The roster module failed to import.")
+            return
+        p = self.ros_var.get().strip()
+        if not p or not os.path.isfile(p):
+            messagebox.showinfo("Pick a file", "Choose a Roster.ROS save first.")
+            return
+        try:
+            self.roster = roster_mod.Roster(p)
+            base, stride = self.roster._color_table()
+            self._logln("Roster: %d chunks, colour table at 0x%X stride %d"
+                        % (len(self.roster.chunks), base, stride))
+        except Exception as ex:
+            self.roster = None
+            messagebox.showerror("Cannot read roster", str(ex))
+            return
+        self._fill_teams()
+
+    def _fill_teams(self):
+        self.team_tree.delete(*self.team_tree.get_children())
+        if not self.roster:
+            return
+        try:
+            rows = self.roster.team_colors(led=self.led_var.get())
+        except Exception as ex:
+            self._logln("teams: %s" % ex)
+            return
+        for code, pri, sec in rows:
+            self.team_tree.insert("", "end", iid=code,
+                                  values=(code, "#%02X%02X%02X" % pri,
+                                          "#%02X%02X%02X" % sec))
+
+    def _edit_team_color(self, _ev=None):
+        if not self.roster:
+            return
+        sel = self.team_tree.selection()
+        if not sel:
+            return
+        code = sel[0]
+        which = _choose(self.root, "Edit %s" % code, "Which colour?",
+                        ["Primary", "Secondary"])
+        if which is None:
+            return
+        from tkinter import colorchooser
+        rgb = colorchooser.askcolor(
+            title="%s %s" % (code, "primary" if which == 0 else "secondary"))
+        if not rgb or not rgb[0]:
+            return
+        v = tuple(int(x) for x in rgb[0][:3])
+        try:
+            if which == 0:
+                self.roster.set_team_color(code, primary=v, led=self.led_var.get())
+            else:
+                self.roster.set_team_color(code, secondary=v, led=self.led_var.get())
+            self.roster.save()
+        except Exception as ex:
+            messagebox.showerror("Cannot save", str(ex))
+            return
+        self._logln("%s %s -> #%02X%02X%02X (saved; .colorbak kept)"
+                    % (code, "primary" if which == 0 else "secondary",
+                       v[0], v[1], v[2]))
+        self._fill_teams()
+
+    # ---------------- live-only tabs ----------------
+    def _build_live_tab(self, tab, title, body):
+        ttk.Label(tab, text=title, font=("", 13, "bold")).pack(anchor="w")
+        ttk.Label(tab, text="Needs a running game — not supported here",
+                  foreground="#b04").pack(anchor="w", pady=(2, 10))
+        ttk.Label(tab, text=body, wraplength=940, justify="left").pack(anchor="w")
+        ttk.Label(tab, wraplength=940, justify="left", foreground="#777",
+                  text="\nThis toolkit edits files on disc and does not attach to "
+                       "a running process, so the feature is out of scope here. "
+                       "The format notes are recorded so it can be built later; "
+                       "the NHL 2K10 Mod Launcher already implements it against "
+                       "Xenia."
+                  ).pack(anchor="w")
+
+    def _build_scorebug(self):
+        t = self.tab_scorebug
+        ttk.Label(t, text="Scoreclock", font=("", 13, "bold")).pack(anchor="w")
+        ttk.Label(t, text="Not yet implemented",
+                  foreground="#b04").pack(anchor="w", pady=(2, 10))
+        ttk.Label(t, wraplength=940, justify="left", text=(
+            "The scoreclock is a small 3D scene serialised inside "
+            "overlay_static.iff: joints plus textured quads, with names stored as "
+            "UTF-16BE strings and name references as crc32 of the RAW, "
+            "case-sensitive string.\n\n"
+            "That differs from asset hashing, which uppercases first — the two "
+            "hashes are not interchangeable, and mixing them up is an easy way to "
+            "resolve nothing.\n\n"
+            "Moving an element means rewriting the baked text-record table, not "
+            "the skeleton joints: the joints are only the bind pose and editing "
+            "them has no visible effect in game."
+        )).pack(anchor="w")
+        ttk.Button(t, text="Extract overlay_static.iff textures",
+                   command=self._extract_overlay).pack(anchor="w", pady=12)
+
+    def _extract_overlay(self):
+        if not (self.arc and asset_names):
+            return
+        e = asset_names.resolve(self.arc, "overlay_static.iff")
+        if not e:
+            messagebox.showinfo("Not found",
+                                "overlay_static.iff is not in this archive.")
+            return
+        self._start(self._do_textures, [e.index])
+
+    # ---------------- Settings ----------------
+    def _build_settings(self):
+        t = self.tab_settings
+        g = ttk.LabelFrame(t, text="Paths", padding=8)
+        g.pack(fill="x")
+        for label, var, browse in (("Output folder", self.out_var, self._browse_out),
+                                   ("Roster.ROS", self.ros_var, self._browse_ros),
+                                   ("xma2encode.exe", self.xma_enc_var,
+                                    self._browse_xma)):
+            r = ttk.Frame(g)
+            r.pack(fill="x", pady=2)
+            ttk.Label(r, text=label, width=16).pack(side="left")
+            ttk.Entry(r, textvariable=var).pack(side="left", fill="x",
+                                                expand=True, padx=6)
+            ttk.Button(r, text="Browse", command=browse).pack(side="left")
+
+        s = ttk.LabelFrame(t, text="Environment", padding=8)
+        s.pack(fill="x", pady=8)
+        for k, v in (
+                ("ffmpeg", "found" if HAS_FFMPEG
+                 else "NOT FOUND — audio decoding disabled"),
+                ("numpy + Pillow", "found" if HAS_WRITE
+                 else "NOT FOUND — replacement disabled"),
+                ("asset names", "%d candidate names" % len(self.names)
+                 if self.names else "unavailable"),
+                ("xma2encode", "set" if self.xma_enc_var.get() else
+                 "not set — needed to encode new audio (XDK tool, cannot be "
+                 "redistributed)")):
+            r = ttk.Frame(s)
+            r.pack(fill="x")
+            ttk.Label(r, text=k, width=16).pack(side="left")
+            ttk.Label(r, text=v).pack(side="left")
+
+        j = ttk.LabelFrame(t, text="Modifications", padding=8)
+        j.pack(fill="x")
+        self.jrn_var = tk.StringVar(value="—")
+        ttk.Label(j, textvariable=self.jrn_var).pack(anchor="w")
+        b = ttk.Frame(j)
+        b.pack(anchor="w", pady=4)
+        ttk.Button(b, text="Refresh", command=self._refresh_journal).pack(side="left")
+        ttk.Button(b, text="Revert all", command=self._revert).pack(side="left",
+                                                                    padx=6)
+        ttk.Label(j, foreground="#777", wraplength=940, justify="left",
+                  text="Every write records the bytes it overwrites to "
+                       "<iso>.undo.json, so any edit can be undone exactly. Keep "
+                       "that file. Work on a copy of the image regardless."
+                  ).pack(anchor="w")
+
+    def _refresh_journal(self):
+        if not (HAS_WRITE and self.iso_var.get()):
+            return
+        try:
+            p = vc_write.Patcher(self.iso_var.get())
+            self.jrn_var.set("%d modified region(s) — journal %s"
+                             % (p.pending(), os.path.basename(p.journal_path)))
+            p.close()
+        except Exception as ex:
+            self.jrn_var.set(str(ex))
+
+    def _browse_xma(self):
+        p = filedialog.askopenfilename(title="xma2encode.exe",
+                                       filetypes=[("Executable", "*.exe"),
+                                                  ("All", "*.*")])
+        if p:
+            self.xma_enc_var.set(p)
 
     def _browse_out(self):
-        p = filedialog.askdirectory(title="Select output folder")
+        p = filedialog.askdirectory(title="Output folder")
         if p:
             self.out_var.set(p)
 
+    def _browse_iso(self):
+        p = filedialog.askopenfilename(title="NHL 2K10 disc image",
+                                       filetypes=[("Disc image", "*.iso"),
+                                                  ("All", "*.*")])
+        if p:
+            self.iso_var.set(p)
+            self._load()
+
+    # ================= plumbing =================
+    def _outdir(self):
+        d = self.out_var.get().strip()
+        os.makedirs(d, exist_ok=True)
+        return d
+
     def _logln(self, s):
-        self.log.insert("end", s + "\n")
-        self.log.see("end")
+        self.q.put(("log", s))
 
     def _load(self):
         iso = self.iso_var.get().strip()
-        if not os.path.exists(iso):
-            messagebox.showerror("Error", "ISO not found:\n%s" % iso)
+        if not iso or not os.path.isfile(iso):
+            self.status_var.set("No disc image loaded")
             return
-        self._logln("Loading %s ..." % iso)
         try:
             self.arc = Archive(iso)
-        except Exception as e:
-            messagebox.showerror("Parse error", str(e))
-            self._logln("ERROR: %s" % e)
+        except Exception as ex:
+            messagebox.showerror("Cannot open", str(ex))
             return
-        # read type of every file (first bytes) via shared handle
         self.rows = []
-        with open(iso, "rb") as f:
-            for e in self.arc.files:
-                a, iso_off, avail = self.arc._stream_to_iso(e.offset)
-                f.seek(iso_off)
-                head = f.read(min(8, e.size, avail))
-                label, ext = classify(head)
-                self.rows.append((e, label, ext))
-        self._logln("Loaded %d files (align=%d, %d archives)." %
-                    (len(self.arc.files), self.arc.align, len(self.arc.archives)))
-        self._refill_tree()
+        for e in self.arc.files:
+            try:
+                head = self.arc.read_file_head(e, 8)
+            except Exception:
+                head = b""
+            self.rows.append((e, classify(head)))
+        named = sum(1 for e, _ in self.rows if e.crc in self.names)
+        self.status_var.set("%d files · %d named" % (len(self.rows), named))
+        self._refill()
+        self._fill_banks()
+        self._refresh_journal()
+        self._logln("Loaded %s — %d entries, %d named"
+                    % (os.path.basename(iso), len(self.rows), named))
 
-    def _refill_tree(self):
-        self.tree.delete(*self.tree.get_children())
-        filt = self.filter_var.get().lower().strip()
-        shown = 0
-        for e, label, ext in self.rows:
-            nm = self.names.get(e.crc, "")
-            if filt and filt not in label.lower() and filt not in nm.lower():
-                continue
-            self.tree.insert("", "end", iid=str(e.index),
-                             values=(e.index, self.names.get(e.crc, ""), label,
-                                     e.size, "-", "0x%08X" % e.crc, e.offset))
-            shown += 1
-        self.count_var.set("%d shown / %d total" % (shown, len(self.rows)))
-
-    # ---------- extraction (threaded) ----------
-    def _start_worker(self, target, *args):
+    def _start(self, target, *args):
         if self.worker and self.worker.is_alive():
-            messagebox.showinfo("Busy", "An extraction is already running.")
+            messagebox.showinfo("Busy", "A job is already running.")
             return
         self.prog["value"] = 0
         self.worker = threading.Thread(target=self._wrap, args=(target, args),
@@ -297,314 +750,33 @@ class ExtractorGUI:
         try:
             target(*args)
         except Exception:
-            self.q.put(("log", "ERROR:\n" + traceback.format_exc()))
-        self.q.put(("done", None))
+            self.q.put(("log", traceback.format_exc()))
 
     def _poll(self):
         try:
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "log":
-                    self._logln(payload)
+                    self.log.insert("end", str(payload) + "\n")
+                    self.log.see("end")
                 elif kind == "prog":
                     self.prog["value"] = payload
                 elif kind == "progmax":
                     self.prog["maximum"] = payload
-                elif kind == "mod":
-                    self.mod_var.set(payload)
-                elif kind == "done":
-                    pass
+                elif kind == "journal":
+                    self._refresh_journal()
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
-
-    def _outdir(self):
-        d = self.out_var.get().strip()
-        os.makedirs(d, exist_ok=True)
-        return d
-
-    def _extract_base(self):
-        if not self.arc:
-            messagebox.showinfo("Load first", "Load an ISO first.")
-            return
-        self._start_worker(self._do_base)
-
-    def _do_base(self):
-        iso = self.arc.iso_path
-        base, entries = xdvdfs.list_files(iso)
-        targets = ["0A", "0B", "1A", "1B", "default.xex", "nxeart"]
-        byname = {e.path: e for e in entries}
-        d = self._outdir()
-        self.q.put(("progmax", len(targets)))
-        with open(iso, "rb") as f:
-            for i, name in enumerate(targets):
-                e = byname.get(name)
-                if not e:
-                    continue
-                op = os.path.join(d, name.replace("/", "_"))
-                self.q.put(("log", "Extracting %s (%d bytes)..." % (name, e.size)))
-                f.seek(xdvdfs.file_offset(base, e))
-                remaining = e.size
-                with open(op, "wb") as o:
-                    while remaining:
-                        chunk = f.read(min(remaining, 8 << 20))
-                        if not chunk:
-                            break
-                        o.write(chunk)
-                        remaining -= len(chunk)
-                self.q.put(("prog", i + 1))
-        self.q.put(("log", "Base files written to %s" % d))
-
-    def _extract_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("No selection", "Select one or more rows.")
-            return
-        idxs = [int(s) for s in sel]
-        self._start_worker(self._do_files, idxs)
-
-    def _extract_all(self):
-        if not self.arc:
-            return
-        idxs = [e.index for e, _, _ in self.rows]
-        self._start_worker(self._do_files, idxs)
-
-    # ---------------- write-back (modding) ----------------
-    def _selected_index(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Select a file", "Pick a file in the list first.")
-            return None
-        return int(sel[0])
-
-    def _require_write(self):
-        if not HAS_WRITE:
-            messagebox.showerror(
-                "Write-back unavailable",
-                "Replacing assets needs numpy and Pillow:\n\n    pip install numpy pillow")
-            return False
-        if not self.arc:
-            messagebox.showinfo("Load an ISO", "Load an ISO first.")
-            return False
-        return True
-
-    def _replace_texture(self):
-        if not self._require_write():
-            return
-        idx = self._selected_index()
-        if idx is None:
-            return
-        try:
-            raw = self.arc.read_file(self.arc.files[idx])
-            dec, bounds = vc_texture.decompress_with_bounds(raw)
-            descs = vc_texture.describe_textures(dec, bounds)
-        except Exception as ex:
-            messagebox.showerror("Cannot read", "File #%d: %s" % (idx, ex))
-            return
-        if not descs:
-            messagebox.showinfo("No textures", "File #%d holds no textures." % idx)
-            return
-        choices = ["%d: %dx%d %s" % (i, d["w"], d["h"],
-                                     vc_texture.GPU_FMT[d["fmt"]][0])
-                   for i, d in enumerate(descs)]
-        ti = _choose(self.root, "Replace texture in file #%d" % idx,
-                     "Which texture?", choices)
-        if ti is None:
-            return
-        d = descs[ti]
-        path = filedialog.askopenfilename(
-            title="Replacement image for %dx%d %s"
-                  % (d["w"], d["h"], vc_texture.GPU_FMT[d["fmt"]][0]),
-            filetypes=[("Images", "*.png *.dds *.tga *.bmp"), ("All", "*.*")])
-        if not path:
-            return
-        if not messagebox.askyesno(
-                "Write to the game?",
-                "This edits the ISO in place.\n\n"
-                "File #%d, texture %d (%dx%d %s)\n%s\n\n"
-                "Every write is journalled — 'Revert ALL mods' restores the disc "
-                "byte-for-byte. Continue?"
-                % (idx, ti, d["w"], d["h"], vc_texture.GPU_FMT[d["fmt"]][0],
-                   os.path.basename(path))):
-            return
-        self._start_worker(self._do_replace_texture, idx, ti, path)
-
-    def _do_replace_texture(self, idx, ti, path):
-        import numpy as np
-        from PIL import Image
-        img = np.array(Image.open(path).convert("RGBA"))
-        self._logln("Replacing file #%d texture %d from %s …"
-                    % (idx, ti, os.path.basename(path)))
-        self._logln("  (recompressing the whole resource — large assets take a while)")
-        info = vc_write.replace_texture(self.iso_var.get(), idx, ti, img)
-        self._logln("  OK  %s %s   %d -> %d bytes (slot %d)"
-                    % (info["dims"], info["format"], info["orig_bytes"],
-                       info["new_bytes"], info["slot"]))
-        self._logln("  journal: %s" % info["journal"])
-        self.q.put(("mod", "modified: file #%d tex %d" % (idx, ti)))
-
-    def _replace_audio(self):
-        if not self._require_write():
-            return
-        idx = self._selected_index()
-        if idx is None:
-            return
-        e = self.arc.files[idx]
-        if self.arc.read_file_head(e, 4)[:4] != b"\x08\x00\x00\x00":
-            messagebox.showerror(
-                "Not an audio stream",
-                "File #%d is not an 08000000 XMA2 stream." % idx)
-            return
-        path = filedialog.askopenfilename(
-            title="Replacement XMA2 clip (slot holds %d bytes)" % e.size,
-            filetypes=[("XMA2 / RIFF-XMA", "*.xma *.wav"), ("All", "*.*")])
-        if not path:
-            return
-        if not messagebox.askyesno(
-                "Write to the game?",
-                "This edits the ISO in place.\n\nFile #%d  (slot %d bytes)\n%s\n\n"
-                "The clip must already be XMA2 — there is no XMA encoder outside "
-                "the Xbox 360 XDK, so PCM .wav files are rejected.\n\n"
-                "'Revert ALL mods' restores the disc byte-for-byte. Continue?"
-                % (idx, e.size, os.path.basename(path))):
-            return
-        self._start_worker(self._do_replace_audio, idx, path)
-
-    def _do_replace_audio(self, idx, path):
-        data = vc_write.xma_from_file(path)
-        self._logln("Replacing audio file #%d with %s (%d bytes) …"
-                    % (idx, os.path.basename(path), len(data)))
-        info = vc_write.replace_audio(self.iso_var.get(), idx, data)
-        self._logln("  OK  %d packets into a %d byte slot"
-                    % (info["packets"], info["slot"]))
-        self.q.put(("mod", "modified: audio #%d" % idx))
-
-    def _revert_mods(self):
-        if not self._require_write():
-            return
-        p = vc_write.Patcher(self.iso_var.get())
-        n = p.pending()
-        p.close()
-        if not n:
-            messagebox.showinfo("Nothing to revert", "No journalled changes.")
-            return
-        if not messagebox.askyesno(
-                "Revert everything?",
-                "Restore %d modified region(s) to their original bytes?" % n):
-            return
-        self._start_worker(self._do_revert)
-
-    def _do_revert(self):
-        n = vc_write.revert(self.iso_var.get())
-        self._logln("Reverted %d region(s) — the disc is back to its original bytes." % n)
-        self.q.put(("mod", ""))
-
-    def _extract_textures(self):
-        sel = self.tree.selection()
-        idxs = [int(s) for s in sel] if sel else [e.index for e, _, _ in self.rows]
-        self._start_worker(self._do_textures, idxs)
-
-    def _do_textures(self, idxs):
-        root = os.path.join(self._outdir(), "textures")
-        os.makedirs(root, exist_ok=True)
-        total = 0
-        for idx in idxs:
-            e = self.arc.files[idx]
-            data = self.arc.read_file(e)
-            if data[:4] not in (b"\xff\x3b\xef\x94", b"\x0e\x48\x37\xc3"):
-                continue
-            try:
-                dec, bounds = vc_texture.decompress_with_bounds(data)
-                res, pbase = vc_texture.extract_textures(dec, bounds)
-            except Exception:
-                res = []
-            asset = self.names.get(e.crc, "")
-            sub = (asset_names.output_dir(root, idx, asset) if asset_names
-                   else os.path.join(root, "%05d" % idx))
-            if res:
-                os.makedirs(sub, exist_ok=True)
-            for n, (desc, fourcc, dds_bytes) in enumerate(res):
-                # Name by the offset within the pixel resource, not the
-                # group-relative one -- offsets restart per group, so the
-                # relative value collides between textures in the same file.
-                pos = desc["base"] + desc["off"] - bounds[-1][0]
-                name = "%02d_%07X_%dx%d_%s.dds" % (n, pos, desc["w"],
-                                                   desc["h"], fourcc)
-                with open(os.path.join(sub, name), "wb") as f:
-                    f.write(dds_bytes)
-                total += 1
-            if res:
-                self.q.put(("log", "  %s: %d textures -> %s"
-                            % (asset or "#%d" % idx, len(res),
-                               os.path.relpath(sub, root))))
-        self.q.put(("log", "Textures done: %d .dds files -> %s" % (total, root)))
-
-    def _extract_wav(self):
-        sel = self.tree.selection()
-        idxs = [int(s) for s in sel] if sel else [e.index for e, _, _ in self.rows]
-        self._start_worker(self._do_wav, idxs)
-
-    def _do_wav(self, idxs):
-        d = os.path.join(self._outdir(), "audio")
-        os.makedirs(d, exist_ok=True)
-        n = 0
-        for idx in idxs:
-            e = self.arc.files[idx]
-            head = self.arc.read_file_head(e, 4)
-            if head[:4] != b"\x08\x00\x00\x00":
-                continue
-            data = self.arc.read_file(e)
-            wav = os.path.join(d, "%05d.wav" % idx)
-            self.q.put(("log", "  #%d: decoding XMA (%.1f MB)..." % (idx, e.size/1e6)))
-            ok, ch, msg = xma_extract.extract_to_wav(data, wav)
-            if ok:
-                n += 1
-                self.q.put(("log", "    -> %d-channel WAV" % ch))
-            else:
-                self.q.put(("log", "    FAIL: %s" % msg))
-        self.q.put(("log", "Audio done: %d WAV files -> %s" % (n, d)))
-
-    def _do_files(self, idxs):
-        d = self._outdir()
-        mode = self.mode_var.get()
-        by_index = {e.index: (e, lbl, ext) for e, lbl, ext in self.rows}
-        self.q.put(("progmax", len(idxs)))
-        ok = fail = 0
-        for i, idx in enumerate(idxs):
-            e, label, ext = by_index[idx]
-            try:
-                data = self.arc.read_file(e)
-                name = "%05d_0x%08X" % (idx, e.crc)
-                out = None
-                if mode == "decompressed" and (data[:4] == b"\xff\x3b\xef\x94"
-                                               or data[:4] == b"\x0e\x48\x37\xc3"):
-                    out, blocks = vc_extract.extract_file(data)
-                if out:                       # decompressed successfully with content
-                    op = os.path.join(d, name + ".dec.iff")
-                    with open(op, "wb") as o:
-                        o.write(out)
-                else:                         # raw (or block-less stub)
-                    op = os.path.join(d, name + "." + ext)
-                    with open(op, "wb") as o:
-                        o.write(data)
-                ok += 1
-            except Exception as ex:
-                fail += 1
-                self.q.put(("log", "  #%d FAIL: %s" % (idx, ex)))
-            if (i + 1) % 25 == 0 or i + 1 == len(idxs):
-                self.q.put(("prog", i + 1))
-                self.q.put(("log", "  ...%d/%d (ok=%d fail=%d)" %
-                            (i + 1, len(idxs), ok, fail)))
-        self.q.put(("log", "Done. %d extracted, %d failed -> %s" % (ok, fail, d)))
 
 
 def main():
     root = tk.Tk()
     try:
-        ttk.Style().theme_use("vista")
+        ttk.Style().theme_use("clam")
     except Exception:
         pass
-    ExtractorGUI(root)
+    App(root)
     root.mainloop()
 
 

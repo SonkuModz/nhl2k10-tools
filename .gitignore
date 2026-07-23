@@ -42,6 +42,11 @@ preview/
 2k10*iso*extract*result/
 isoextract/
 
+# The Mod Launcher project lives here as a reference checkout. It is a separate
+# repository with its own history and authors -- absorb findings from it, do not
+# vendor it in.
+NHL-2k10-Mod-Launcher-main/
+
 # --- third-party tools: install them yourself ---
 ghidra_*_PUBLIC/
 jdk/

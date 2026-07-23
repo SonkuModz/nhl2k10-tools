@@ -36,9 +36,6 @@ extracted/
 isoextract/
 preview/
 
-# Decompiler output derived from the retail executable — see README.
-docs/ghidra_decompiled.c
-
 # Third-party tools: install these yourself, they are not ours to redistribute.
 ghidra_*/
 jdk/

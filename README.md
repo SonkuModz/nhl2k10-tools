@@ -120,6 +120,7 @@ Both are worth understanding before trusting any output — see
 |---|---|
 | [`docs/00_RESEARCH_REPORT.md`](docs/00_RESEARCH_REPORT.md) | filesystem, archive format, file census, hashing |
 | [`docs/01_DECOMPRESSOR_RE.md`](docs/01_DECOMPRESSOR_RE.md) | how the `0E4837C3` codec was reversed |
+| `docs/ghidra_decompiled.c` | decompiled listings of the ten codec variants |
 | [`docs/02_AUDIO_AND_TEXTURES.md`](docs/02_AUDIO_AND_TEXTURES.md) | descriptor layout, tiling, mip rules, verification |
 | [`docs/04_MODDING_INTEL.md`](docs/04_MODDING_INTEL.md) | write-back constraints, cross-checked against external work |
 | [`docs/05_WRITE_BACK.md`](docs/05_WRITE_BACK.md) | replacement pipeline and safety model |
@@ -149,10 +150,11 @@ Reverse engineering for interoperability. No copyrighted game content is
 included, and the repository ships nothing you could use without your own copy of
 the game.
 
-Verbatim decompiler output from the retail executable is **not** committed
-(`docs/ghidra_decompiled.c` is git-ignored); the documentation describes the
-*format* — facts about data layout — and the implementations here are written
-from those findings.
+`docs/ghidra_decompiled.c` contains decompiler output for the ten compression
+routines, included so others can continue the analysis. Everything else here
+documents the *format* — facts about data layout, which are not copyrightable —
+and every implementation in `tools/` is written from those findings rather than
+translated from the binary.
 
 Not affiliated with, endorsed by, or connected to 2K Sports, Visual Concepts,
 Take-Two Interactive or the NHL. All trademarks belong to their respective owners.

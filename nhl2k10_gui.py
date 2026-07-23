@@ -314,8 +314,10 @@ class App(object):
         e.bind("<KeyRelease>", lambda ev: self._refill())
         ttk.Button(bar, text="Extract textures",
                    command=self._extract_textures).pack(side="left", padx=4)
+        ttk.Button(bar, text="Extract ALL textures",
+                   command=self._extract_all_textures).pack(side="left")
         ttk.Button(bar, text="Extract raw file",
-                   command=self._extract_raw).pack(side="left")
+                   command=self._extract_raw).pack(side="left", padx=4)
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(bar, text="Replace texture…",
                    command=self._replace_texture).pack(side="left")
@@ -365,24 +367,62 @@ class App(object):
         if idxs:
             self._start(self._do_textures, idxs)
 
-    def _do_textures(self, idxs):
+    def _extract_all_textures(self):
+        """Every texture in the archive, into the organised tree."""
+        if not self.arc:
+            return
+        # Only files that can hold textures -- skip audio, manifests and the rest
+        # rather than decompressing 2,407 entries to find out.
+        idxs = [e.index for e, label in self.rows if label.startswith("IFF")]
+        if not idxs:
+            return
+        if not messagebox.askyesno(
+                "Extract everything?",
+                "Extract textures from all %d IFF files into\n\n%s\n\n"
+                "They are sorted into folders by asset type. This decompresses "
+                "every package, so expect it to take a while — the log and "
+                "progress bar update as it goes."
+                % (len(idxs), os.path.join(self._outdir(), "textures"))):
+            return
+        self._start(self._do_textures, idxs, True)
+
+    def _do_textures(self, idxs, quiet=False):
         root = os.path.join(self._outdir(), "textures")
         os.makedirs(root, exist_ok=True)
         self.q.put(("progmax", len(idxs)))
         total = 0
+        files = 0
+        failed = 0
+        by_cat = {}
         for n, idx in enumerate(idxs):
             asset = self.names.get(self.arc.files[idx].crc, "")
             try:
                 cnt, sub = vc_texture.dump_file(self.arc, idx, root, asset)
                 if cnt:
                     total += cnt
-                    self._logln("  %s: %d textures -> %s"
-                                % (asset or "#%d" % idx, cnt,
-                                   os.path.relpath(sub, root)))
+                    files += 1
+                    rel = os.path.relpath(sub, root)
+                    cat = rel.replace("\\", "/").rsplit("/", 1)[0]
+                    by_cat[cat] = by_cat.get(cat, 0) + cnt
+                    # one line per file is unreadable across 2,000 files
+                    if not quiet:
+                        self._logln("  %s: %d textures -> %s"
+                                    % (asset or "#%d" % idx, cnt, rel))
+                    elif files % 50 == 0:
+                        self._logln("  … %d files, %d textures so far"
+                                    % (files, total))
             except Exception as ex:
-                self._logln("  #%d: %s" % (idx, ex))
+                failed += 1
+                if not quiet:
+                    self._logln("  #%d: %s" % (idx, ex))
             self.q.put(("prog", n + 1))
-        self._logln("Done: %d .dds -> %s" % (total, root))
+
+        self._logln("Done: %d textures from %d files -> %s" % (total, files, root))
+        if by_cat:
+            for cat in sorted(by_cat):
+                self._logln("    %-28s %6d" % (cat, by_cat[cat]))
+        if failed:
+            self._logln("    %d file(s) could not be read" % failed)
 
     def _extract_raw(self):
         idxs = self._selected()

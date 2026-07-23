@@ -1,56 +1,24 @@
-# Allowlist policy: ignore EVERYTHING, then re-admit only our own source and
-# documentation. This directory also holds a 7.8 GB disc image, ~36 GB of
-# extracted game assets and several hundred MB of third-party tools, none of
-# which belong in a repository — an allowlist means none of it can be added by
-# accident, even by `git add -A`.
+# Documentation-only repository.
+#
+# This folder also contains a 7.8 GB disc image, ~36 GB of extracted game
+# assets, third-party tools and working code. None of it belongs here, so the
+# policy is an allowlist: ignore everything, then re-admit only the docs.
 
 *
 
-# --- our code ---
-!tools/
-!tools/**/*.py
-!tools/**/*.java
-!nhl2k10_extractor_gui.py
-!run_ghidra_headless.bat
-
-# --- documentation ---
+!README.md
+!LICENSE
+!.gitignore
 !docs/
 !docs/*.md
 !docs/*.csv
-!README.md
-!LICENSE
-!requirements.txt
-!.gitignore
 
-# --- never, under any circumstances ---
-# Game data: you supply your own legally obtained disc.
+# Explicitly, never: game data of any kind. Bring your own copy.
 *.iso
-*.iso.undo.json
 *.xex
 *.xma
 *.bnk
 *.dds
 *.wav
 extracted/
-2k10*iso*extract*result/
-isoextract/
 preview/
-
-# Third-party tools: install these yourself, they are not ours to redistribute.
-ghidra_*/
-jdk/
-QuickBMS/
-Noesis/
-iso2god-*/
-20209.3_Xenon_Recovery_with_Symbols/
-2K BMS Scripts*/
-
-# --- junk ---
-__pycache__/
-*.pyc
-*.log
-.venv/
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db

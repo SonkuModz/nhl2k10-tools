@@ -1,31 +1,12 @@
-# NHL 2K10 — Audio & Texture Extraction
+# 03 — Textures: format and dumping
 
-Both working end-to-end. Tools: `tools/xma_extract.py`, `tools/vc_texture.py`,
-`tools/dds.py`, `tools/bcdec.py`. All wired into `nhl2k10_extractor_gui.py`.
+How texture data is stored, located and decoded. Everything below is verified
+against Xenia GPU dumps or against the game's own data; where something is
+unproven it says so.
 
-## Audio — `08000000` files = raw XMA2
+Audio is covered separately in [`04_AUDIO.md`](04_AUDIO.md).
 
-The 23 `08000000` archive files (incl. the 1.07 GB commentary bank) are **raw
-Xbox 360 XMA2** packet streams:
-
-* Exactly 2048-byte packets, no container/RIFF header.
-* Packet header (big-endian dword): frame_count(6) | frame_offset_bits(15) |
-  metadata(3) | skip(8) — all parse cleanly.
-
-**Extraction:** wrap the packet stream in a RIFF `fmt `(0x0166 = XMA2) + `data`
-chunk, then decode with **ffmpeg** (`xma2` decoder). Channels are auto-detected
-by probe-decoding (ch=2 then ch=1; take the one ffmpeg accepts). Validated: file
-#2277 → 2:28 of clean mono audio (mean −11.8 dB).
-
-**Caveat — sample rate:** XMA2 does not store the sample rate in the bitstream;
-it lives in the (not-yet-located) sound-bank metadata. The tool defaults to
-48000 Hz (`--rate`). A wrong rate only changes playback speed, not decodability.
-
-```
-python tools/xma_extract.py <iso> <index> --ch 0 --rate 48000 --wav out.wav
-```
-
-## Textures → DDS
+## Overview
 
 Texture IFFs decompress to sub-resources: one or more **descriptor tables**, and
 the **last** sub-resource holding the tiled pixel data. Each descriptor is
@@ -96,9 +77,11 @@ linear = crop( unswizzle_x360( endian_swap16(blob), pw, ph, block_dim, block_byt
 DDS    = header + linear
 ```
 
-Untiling uses `reversebox.image.swizzling.swizzle_x360.unswizzle_x360` (stock
-Xbox-360 tiling). **`pip install reversebox` is a dependency**; `numpy` and
-`Pillow` are needed for previews and the order resolver.
+The tiling function is the stock Xbox 360 `XGAddress2DTiledOffset`. Implement it
+carefully or borrow a known-good one — a hand-rolled version proved *non-bijective*
+(576 distinct addresses out of 4096, dropping x bits 3 and 4), which silently
+repeats the image ~4x4 and is easy to mistake for a different bug. Verify any
+implementation is a true permutation before trusting it.
 
 ### The full record is 0xE0 bytes starting 0x58 earlier
 
@@ -145,10 +128,10 @@ against the sub-resource size to tell which of three layouts is in play:
 Some IFFs leave `+0x14` at a constant sentinel (`1`) for every entry. There the
 textures are stored back-to-back — but **not necessarily in table order** (file
 #17 stores the jersey sheet before its normal map, while file #203 stores the
-same pair the other way round). `mip_consistency()` resolves this without any
+same pair the other way round). A **mip-consistency check** resolves this without any
 ground truth: a texture's mip level 1 must be a 2x downscale of its own base, so
 correlating the two scores ~0.99 at the right offset and ~0.00 elsewhere.
-`_resolve_order()` greedily fills slots using that score.
+Greedily fill slots using that score.
 
 ## Verification
 
@@ -165,9 +148,9 @@ Two independent methods, both reusable:
 * **Mip self-consistency** (no ground truth needed) — see above. This is the
   metric to use on textures Xenia never rendered.
 
-Convert to PNG: `ffmpeg -i x.dds x.png`, or use `tools/bcdec.py`, which decodes
-BC1/BC2/BC3/BC4/BC5 and the uncompressed formats to RGBA in numpy (Pillow cannot
-do BC4/BC5 and ffmpeg does not handle the ATI2 fourcc).
+To view the result: `ffmpeg -i x.dds x.png` handles the common formats, but note
+Pillow cannot decode BC4/BC5 and ffmpeg does not recognise the `ATI2` fourcc, so
+single- and dual-channel formats need your own decoder.
 
 Only the base mip level is emitted as DDS today; the mip chain is located and
 sized correctly, so writing full mip pyramids is a small change.

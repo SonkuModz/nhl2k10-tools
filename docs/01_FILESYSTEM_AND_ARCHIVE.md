@@ -1,9 +1,13 @@
-# NHL 2K10 (Xbox 360, Europe) — Reverse-Engineering Research Report
+# 01 — Disc filesystem and archive format
 
-**Subject:** `NHL 2K10 (Europe).iso` (7,838,695,424 bytes)
+Where the data lives and how to get at it: the disc filesystem, the archive
+container, and how a file is located inside it.
+
+**Subject:** NHL 2K10 (Europe), retail disc image (7,838,695,424 bytes)
 **Engine:** Visual Concepts (2K Sports) — confirmed from executable strings
 **Executable:** `nhl_clean_opt.target.xex` · Take-Two Title ID `TT-2131` / `0x54540853` · built 2009-07-27
-**Status:** Research / documentation phase complete. Extraction tooling scaffolded and modular.
+**Region note:** offsets below are from the European release. Other regions use
+the same structures; absolute offsets will differ.
 All findings below were validated by direct binary inspection, not assumed.
 
 ---
@@ -35,7 +39,7 @@ disassembling one PowerPC routine in the executable.
 
 ## 1. Disc filesystem map (Phase 1)
 
-Parsed with a purpose-written XDVDFS reader (`tools/xdvdfs.py`). The Xbox 360 game
+The Xbox 360 game
 partition begins at byte offset **`0x0FD90000`** (XGD2 layout); the
 `MICROSOFT*XBOX*MEDIA` volume descriptor sits at partition_base + `0x10000`.
 
@@ -87,7 +91,7 @@ File table    (num_files * 16 bytes) @ 0x58:
 Verified numbers: `align=2048`, `4` archives, `2407` files, virtual stream
 = 6,098,978,816 bytes; sum of file sizes = 6,096,526,000 bytes (difference = index +
 alignment padding). Files may straddle a split boundary; the extractor stitches
-across (see `nhl2k_arc.py`).
+across.
 
 **Naming:** there are **no stored filenames** in the master archive. Each entry is
 keyed by a 32-bit hash and the table is kept sorted so the game can binary-search
@@ -146,8 +150,8 @@ window variants. Reversed with Ghidra (bundled in `ghidra_12.1.2_PUBLIC/`, JDK 2
 in `jdk/`). Block header is 0x14 bytes; the dword at `+0x10` is the offset-bit
 width (8–15). Decode: control byte (LSB-first), `0`=literal, `1`=2-byte match
 (`offset = tok & ((1<<offbits)-1)`, `length = (tok>>offbits)+3`); an all-zero
-control byte fast-copies 8 literals. A pure-Python decoder (`tools/vc_decomp.py`,
-`tools/vc_extract.py`) decompresses the archive with a **100% success rate**
+control byte fast-copies 8 literals. A decoder written from
+this description decompresses the archive with a **100% success rate**
 (validated 193 files / 840 blocks / 0 failures, mean 2.77×). Textures, models, and
 UI are now fully extractable.
 
@@ -168,7 +172,7 @@ texture header decoded (format/dims/endian). Key fix: `pixel_base` = 4KB-aligned
 start of the **last decompressed sub-resource** (offsets are relative to it). The
 DXT1 majority (e.g. 53/72 in arena file #261) now extracts to clean **DDS**;
 DXT5 (alpha-decal color/alpha swap) and uncompressed ARGB are partial.
-`tools/vc_texture.py`. Meshes/models remain future work.
+Meshes/models remain future work.
 
 The provided Noesis NHL plugins (`mdl_NHLLegacy_X360_rx2.py`, magic `‰RW4xb2`) are
 for **EA's** RenderWare NHL games and **do not apply** to this 2K/Visual Concepts
@@ -191,7 +195,7 @@ executable contains `RIFF` and audio-manager strings.
 ```
 
 **Extraction status — audio SOLVED (see `docs/02_AUDIO_AND_TEXTURES.md`).** The
-`08000000` files are raw **XMA2** (2048-byte packets). `tools/xma_extract.py` wraps
+`08000000` files are raw **XMA2** (2048-byte packets). Wrapping them
 them in a RIFF `fmt `(0x0166) header and decodes to **WAV** via ffmpeg, auto-
 detecting channels (validated: #2277 → 2:28 of clean mono audio). Sample rate isn't
 stored in the bitstream (defaults to 48 kHz, adjustable).
@@ -313,22 +317,3 @@ which makes it tractable to finish.
    `*.iff`) and CRC-32-match against the 2,407 archive hashes and in-IFF child hashes.
 
 ---
-
-## 10. Tooling delivered (modular, reusable)
-
-All under `tools/` (Python 3, stdlib only), designed as the core of a future
-NHL 2K10 modding tool:
-
-| Module | Role |
-|--------|------|
-| `xdvdfs.py` | Xbox 360 disc image (XDVDFS) reader → file list + byte offsets |
-| `nhl2k_arc.py` | `AA00B3BF` master-archive parser + direct-from-ISO file extractor |
-| `census.py` | First-bytes magic census of all 2,407 files → `docs/file_census.csv` |
-| `analyze_ff3b.py` | `FF3BEF94`/`0E4837C3` structural field analysis |
-| `scan_blocks.py` | Size ranking, non-IFF census, compression-ratio stats |
-| `examine_meta.py` | Dumps uncompressed manifests + inspects giant audio files |
-| `id_hash.py` | Filename-hash identification (proved CRC-32) |
-| `dump_file.py`, `peek_headers.py`, `decompress_probe.py`, `probe2.py`, `lzss_bruteforce.py` | inspection / codec-cracking harnesses |
-| `xex_strings.py` | Engine/format string mining of the decrypted XEX |
-
-Full per-file inventory: **`docs/file_census.csv`** (index, size, hash, offset, magic).

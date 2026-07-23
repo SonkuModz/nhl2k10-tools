@@ -1,23 +1,16 @@
-# 05 — Write-back: texture and audio replacement
+# 05 — Replacing assets
 
-**Status: working and verified against the real ISO.** A texture was encoded,
-compressed, written to disc, read back from disc, decoded, and confirmed to be the
-new art (40.6 dB) — then reverted to a byte-identical file. Audio likewise.
+Everything here was implemented and verified against a real disc image: a texture
+was encoded, compressed, written, read back from disc, decoded, and confirmed to
+be the new art (40.6 dB) — then reverted to a byte-identical file. Audio likewise.
 
-Tools: `tools/patcher.py`, `tools/vc_compress.py`, `tools/bcenc.py`,
-`tools/vc_write.py`. Wired into the GUI's **Mod** row.
+This document is the specification, not a manual for any particular tool.
 
 ## Safety model — read this first
 
-Nothing is written without first recording what was there. `Patcher` journals the
-original bytes of every region it touches into `<iso>.undo.json`, so:
+Nothing is written without first recording what was there. Journal the original bytes of every region you touch to a side file before
+writing, so any edit can be undone exactly:
 
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" status
-```
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" revert
-```
 
 `revert` restores the disc **byte-for-byte** (verified by SHA-256 both ways). If
 the same region is written twice the *first* original is kept, so revert always
@@ -30,18 +23,18 @@ edits can no longer be undone automatically.
 ## Why in-place only
 
 The engine sizes its decompression / VRAM buffer from the **original** resource, so
-a larger *decompressed* payload overflows it and crashes (see `04`). We only ever
+a larger *decompressed* payload overflows it and crashes (see [`06_EXTERNAL_NOTES.md`](06_EXTERNAL_NOTES.md)). We only ever
 change content, never decompressed size, so that constraint holds by construction.
 
 The *compressed* result still has to fit the archive slot. When it doesn't, the
 replace is **refused** with the measured sizes rather than relocated — relocation
 needs the TOC rewritten and record offsets redirected, which is exactly the path
-that historically corrupted saves (again, see `04`).
+that historically corrupted saves (again, see [`06_EXTERNAL_NOTES.md`](06_EXTERNAL_NOTES.md)).
 
 ## The compressor
 
-`vc_compress.py` is the exact inverse of the decoder and uses a **least-cost
-parse**: a literal costs 1 control bit + 8, a match 1 + 16, so the cheapest
+The compressor must be the exact inverse of the decoder and should use a
+**least-cost parse**: a literal costs 1 control bit + 8, a match 1 + 16, so the cheapest
 encoding is a shortest path over positions. Because the token packs length into
 `16 - offbits` bits the longest match is short (18 bytes at offbits=12), which
 makes the DP cheap.
@@ -57,9 +50,8 @@ beats the original on every block tested:
 | #17 | 10 | 4,918 | 4,669 | −5.1% |
 | #203 | 9 | 324 | 292 | −9.9% |
 
-Every produced block is round-tripped through the real decoder before it is
-allowed anywhere near the disc (`compress_verified`), with an all-literal fallback
-if the matcher ever misbehaves.
+Round-trip every produced block through the real decoder before it goes anywhere
+near the disc, and keep an all-literal fallback for when the matcher misbehaves.
 
 **Speed.** The first version ran at 11 KB/s — 12.6 minutes for one texture in
 file #17, which is not usable. Two fixes:
@@ -67,9 +59,9 @@ file #17, which is not usable. Two fixes:
 * The match search no longer allocates a `bytes` slice per position (the 3-byte
   hash key is a rolling integer) and stops as soon as a candidate hits the length
   cap: **11 -> 55 KB/s**.
-* `rebuild_raw` re-uses work. A block whose payload did not change is copied
+* Re-use work. A block whose payload did not change is copied
   verbatim, and a changed block re-uses the ORIGINAL token stream up to the first
-  differing byte (`reusable_prefix`). LZ decoder state is a pure function of the
+  differing byte . LZ decoder state is a pure function of the
   bytes decoded so far, so replaying those tokens reproduces the identical state —
   and the round-trip check still has to pass regardless.
 
@@ -85,23 +77,17 @@ work rather than worse work.
 
 ## Textures
 
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" list-textures 0
-```
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" texture 0 13 my_art.png
-```
 
 * The image must be **exactly** the texture's size. Resolution changes need the
   Xenos packed mip-tail layout and are not supported.
-* Encoders (`bcenc.py`) are the exact inverse of `bcdec.py`: BC1/BC2/BC3/BC4/BC5
-  plus ARGB/RGB565/ARGB4444/L8/RG8. Endpoints come from a principal-axis fit;
-  measured 36–37 dB on BC formats, lossless on ARGB/L8/RG8.
-* **Alpha is straight, never premultiplied** (see `04`) — premultiplying is what
+* Encoders must be the exact inverse of the decoders. Fitting BC endpoints along
+  the block's principal colour axis (rather than per-channel min/max) measures
+  36–37 dB on BC formats; ARGB/L8/RG8 are lossless.
+* **Alpha is straight, never premultiplied** (see [`06_EXTERNAL_NOTES.md`](06_EXTERNAL_NOTES.md)) — premultiplying is what
   makes replacements look washed out.
 * **The mip chain is regenerated down to 32px**, not just mip 0. Replacing only
   the base level leaves the old art showing at distance *and* breaks
-  `mip_consistency()`, which is how the extractor resolves texture order — a
+  the mip-consistency check that resolves texture order — a
   replaced texture with a stale chain made the extractor mis-order the file on
   re-read.
 
@@ -129,7 +115,7 @@ texture leaves exactly that much over: 0x1000 (ARGB4444 2048x512), 0x2000 (DXT1)
 into that space, which is structurally wrong. It now **stops at 32px and leaves
 the original tail bytes untouched** — old art at extreme minification, but a valid
 surface. Verified: every regenerated level correlates 1.000 with the new base, the
-tail compares byte-identical to the original, and `mip_consistency()` reads 1.000.
+tail compares byte-identical to the original, and the mip check reads 1.000.
 
 Cracking the packed tail (RexGlue `rex/graphics/xenos.h`) is the remaining work.
 
@@ -144,17 +130,11 @@ f#6    tex2   512x512  DXT1      rebuild=OK  39.32 dB  mip=1.00
 
 ## Audio
 
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" list-audio
-```
-```bash
-python tools/vc_write.py "NHL 2K10 (Europe).iso" audio 56 clip.xma
-```
 
 > **You cannot convert a WAV to XMA here, and neither can any other free tool.**
 > There is no XMA2 encoder outside the Xbox 360 XDK — ffmpeg *decodes* XMA but
-> cannot produce it. `xma_from_file()` therefore rejects PCM WAVs with an explicit
-> message rather than writing something the console cannot play.
+> cannot produce it. Reject PCM input explicitly rather than writing
+> something the console cannot play.
 
 What does work: any source that is *already* XMA2 — another clip from this game,
 or a `.xma` from an XDK-based encoder. The stream must be whole 2048-byte packets
@@ -169,5 +149,5 @@ ffmpeg, then reverted byte-identically.
 * No resolution changes.
 * Cubemaps write face 0 only.
 * `global.iff`-class packs whose offsets the loader fills in at runtime are not
-  addressable statically (see `04`).
+  addressable statically (see [`06_EXTERNAL_NOTES.md`](06_EXTERNAL_NOTES.md)).
 * Pure-Python compression is slow on multi-MB resources.

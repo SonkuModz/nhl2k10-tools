@@ -1,9 +1,9 @@
-# 04 — Write-back / modding intel (external, partially verified)
+# 06 — External notes, cross-checked
 
-Source: `03_texture_modding.md` from a separate **Mod Launcher** project. This file
-records what it claims, what we independently confirmed, and what is still
-unverified here. Our tooling is read-only today; this is the reference for adding
-write-back.
+Source: texture-modding notes from a separate **Mod Launcher** project. This file
+records what those notes claim, what was independently confirmed against this
+game's own data, and what remains unverified. Where the two accounts disagree,
+both positions are stated rather than reconciled by assumption.
 
 ## Confirmed against our own data
 
@@ -12,7 +12,7 @@ write-back.
   by 0x58. Two independent derivations agreeing is strong evidence the layout is
   right. Records are 0xE0 bytes; a record starts 0x58 before what we parse.
 * **`count @0x20`, `ptr @0x24`**, table at `ptr + 0x7B` — verified exactly on four
-  files (see `02`).
+  files (see [`02_COMPRESSION.md`](02_COMPRESSION.md)).
 * **Format codes.** Their bytes-per-block table (DXT1 = 8, DXT2_3/DXT4_5 = 16,
   565/1555/4444 = 2, 8888 = 4) matches ours.
 * **Byte order.** DXT colour endpoints big-endian, indices little-endian; 16-bit

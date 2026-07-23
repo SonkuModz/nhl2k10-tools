@@ -68,7 +68,8 @@ Module-level notes live in [`nhl2k10/README.md`](nhl2k10/README.md) and
 
 **Disc.** XDVDFS/XGD2, partition base `0x0FD90000`. Nearly everything lives in
 four split files that concatenate into one 6.1 GB `AA00B3BF` archive holding 2,407
-entries, indexed by a sorted 32-bit hash table with no filenames.
+entries, indexed by `CRC-32(NAME.UPPER())` and sorted for binary search. Names are
+recoverable by generating candidates and testing — 443 so far.
 
 **Files.** Most entries are Visual Concepts IFF packages (`FF3BEF94`) containing
 one or more `0E4837C3` compressed blocks. That codec is an interleaved LZSS with
@@ -104,9 +105,12 @@ These are the mistakes that produced convincing but wrong results:
   repeated the image ~4×4 — subtle enough to survive eyeballing.
 * **Import the XEX as `PowerPC:BE:64`, not BE:32.** As 32-bit the `ldx`/`std`
   instructions decode as bad data and the decompiler truncates mid-function.
-* **The archive TOC key is *not* CRC-32 of the filename.** An earlier version of
-  these notes claimed it was; that was wrong, and is corrected in `01` §7. Naming
-  archive entries remains unsolved.
+* **The archive TOC key is CRC-32 of the *uppercased* name, extension included** —
+  while the `E4791207` manifests use CRC-32 of the *lowercase stem*. Two tables,
+  two rules. An earlier version of these notes claimed the archive key was not a
+  CRC-32 at all; that was wrong, and the sweep that "proved" it had a helper which
+  force-lowercased its own input. If a parameter sweep returns zero across every
+  variant, suspect the harness.
 
 ## How the claims here were checked
 
@@ -129,7 +133,9 @@ against the *game's* data, never against your own reader.
 
 ## What is still unknown
 
-* **Archive filenames.** The TOC hash is not CRC-32 of any name form tested.
+* **Most archive filenames.** The hash is one-way, so names are recovered by
+  generating candidates and testing; 443 of 2,407 entries are named so far. The
+  method works, the template list is just incomplete.
 * **The Xenos packed mip tail** — the layout below 32px, which is why replacement
   can only regenerate mips down to that size.
 * **Resolution changes**, which need that same packed layout.

@@ -345,6 +345,9 @@ def _main(argv):
     a.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("list-audio", help="show the XMA2 streams and their slot sizes")
+    nm = sub.add_parser("find", help="resolve an asset name to its archive index")
+    nm.add_argument("name", help='e.g. "led_pit.iff"')
+    sub.add_parser("list-names", help="every archive entry we can name")
     ls = sub.add_parser("list-textures", help="show the textures in one file")
     ls.add_argument("file_index", type=int)
     sub.add_parser("status", help="show journalled (modified) regions")
@@ -360,6 +363,22 @@ def _main(argv):
     elif ns.cmd == "audio":
         data = xma_from_file(ns.clip)
         print(replace_audio(ns.iso, ns.file_index, data, dry_run=ns.dry_run))
+    elif ns.cmd == "find":
+        import names as NM
+        arc = Archive(ns.iso)
+        e = NM.resolve(arc, ns.name)
+        if e is None:
+            print("%s -> no entry (hash %08X)" % (ns.name, NM.name_hash(ns.name)))
+            return 1
+        print("%s -> #%d, %d bytes, hash %08X" % (ns.name, e.index, e.size, e.crc))
+    elif ns.cmd == "list-names":
+        import names as NM
+        arc = Archive(ns.iso)
+        cat = NM.build_catalog()
+        rows = [(e.index, e.size, cat[e.crc]) for e in arc.files if e.crc in cat]
+        for idx, size, n in sorted(rows, key=lambda r: r[2]):
+            print("  #%-5d %10d  %s" % (idx, size, n))
+        print("%d of %d entries named" % (len(rows), len(arc.files)))
     elif ns.cmd == "list-audio":
         for idx, sz in audio_slots(ns.iso):
             print("  #%-5d %12d bytes" % (idx, sz))

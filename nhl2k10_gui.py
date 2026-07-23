@@ -34,6 +34,10 @@ import vc_texture
 import xma_extract
 import shutil
 try:
+    import names as asset_names          # CRC-32(NAME.UPPER()) -> readable name
+except Exception:
+    asset_names = None
+try:
     import vc_write                     # write-back; needs numpy + Pillow
     HAS_WRITE = True
 except Exception:
@@ -122,6 +126,8 @@ class ExtractorGUI:
         root.geometry("1000x680")
         self.arc = None
         self.rows = []            # (entry, type_label, ext)
+        # name_hash -> readable asset name, for entries we can identify
+        self.names = asset_names.build_catalog() if asset_names else {}
         self.q = queue.Queue()
         self.worker = None
         self._build()
@@ -170,10 +176,11 @@ class ExtractorGUI:
                         variable=self.mode_var).pack(side="left")
 
         # tree
-        cols = ("idx", "type", "csize", "dsize", "hash", "offset")
+        cols = ("idx", "name", "type", "csize", "dsize", "hash", "offset")
         self.tree = ttk.Treeview(self.root, columns=cols, show="headings",
                                  selectmode="extended")
-        headers = {"idx": ("#", 60), "type": ("Type", 160), "csize": ("Stored", 100),
+        headers = {"idx": ("#", 60), "name": ("Name", 190),
+                   "type": ("Type", 150), "csize": ("Stored", 100),
                    "dsize": ("Decompressed", 110), "hash": ("Name hash", 110),
                    "offset": ("Stream offset", 120)}
         for c in cols:
@@ -267,11 +274,12 @@ class ExtractorGUI:
         filt = self.filter_var.get().lower().strip()
         shown = 0
         for e, label, ext in self.rows:
-            if filt and filt not in label.lower():
+            nm = self.names.get(e.crc, "")
+            if filt and filt not in label.lower() and filt not in nm.lower():
                 continue
             self.tree.insert("", "end", iid=str(e.index),
-                             values=(e.index, label, e.size, "-",
-                                     "0x%08X" % e.crc, e.offset))
+                             values=(e.index, self.names.get(e.crc, ""), label,
+                                     e.size, "-", "0x%08X" % e.crc, e.offset))
             shown += 1
         self.count_var.set("%d shown / %d total" % (shown, len(self.rows)))
 

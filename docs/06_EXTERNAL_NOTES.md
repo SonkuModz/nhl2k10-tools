@@ -21,17 +21,23 @@ both positions are stated rather than reconciled by assumption.
 
 ## Claimed, NOT yet verified here
 
-* **Asset name templates** keyed by 3-letter team code (`logo_{code}.iff`,
+* **Asset name templates** keyed by 3-letter team code — **verified** (`logo_{code}.iff`,
   `uniform_base_{code}_{home|away|alt}.iff` = 565 1024x1024,
   `uniform_{code}_{home|away|alt}.iff` = 4444 2048x512, `rink_{code}.iff`,
   `ice_{code}_{playoffs|finals}.iff`, `led_{code}.iff`, `zamboni_{code}.iff`).
   Phoenix is `pho`. `arena_{code}.iff` is an audio bank, not a texture.
 
-  > **These do not resolve against our archive TOC.** We brute-forced all 17,576
-  > three-letter codes against eight of these templates using CRC-32 and got
-  > **zero** hits. See the correction in `00_RESEARCH_REPORT.md` §7: the TOC key
-  > is not a CRC-32 of any name form we have tried. Reconcile before relying on
-  > either account — most likely their launcher keys a different table.
+  > **CONFIRMED — and they were right where we were wrong.** These templates all
+  > resolve, once the hash is `CRC-32(name.upper())` with the extension included.
+  > Our earlier "zero hits" result came from a broken test helper that
+  > force-lowercased its input, so the uppercase case was never actually tried.
+  > All 30 team codes resolve; 443 archive entries are now named. See
+  > [`01_FILESYSTEM_AND_ARCHIVE.md`](01_FILESYSTEM_AND_ARCHIVE.md) §7.
+  >
+  > One correction back: `arena_{code}.iff` is **not** an audio bank. All three
+  > checked are `FF3BEF94` texture packages of 5-7 MB — `arena_nyr.iff` is the
+  > file where all 91 textures verified byte-exact. The audio banks are
+  > `sfx_arena###.bnk` / `ksfx_arena###.bnk`.
 
 * `logo_{code}.iff` is **uncompressed** — a raw IFF with no `0E4837C3` blocks.
   Our extractor should handle that path explicitly.

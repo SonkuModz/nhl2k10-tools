@@ -222,50 +222,88 @@ roster database.
 
 ---
 
-## 7. File-naming hash — SOLVED & verified (Phase 2)
+## 7. Asset naming — SOLVED
 
-The `E4791207` manifests store `{name_hash, name}` pairs with names in UTF-16BE.
-Testing the ground-truth pairs against many hash functions yielded an exact match:
+There are **two different hashes** in this game, which is what made this hard.
 
-**`name_hash = CRC-32 (IEEE / zlib polynomial) of the lowercase name with the
-extension removed`.**
+### The archive TOC key
 
-| Name | CRC-32 | Present in manifest |
-|------|--------|---------------------|
-| `english` | `0x2C830200` | ✅ |
-| `finnish` | `0xA77782DF` | ✅ |
-| `french`  | `0xAF75CE5E` | ✅ |
-| `german`  | `0xA23440A1` | ✅ |
-| `swedish` | `0xB3208328` | ✅ |
+```python
+key = zlib.crc32(name.upper().encode("ascii")) & 0xFFFFFFFF
+```
 
-5/5 exact; the full-name-with-`.iff` variants are **not** present, proving the
-extension is stripped.
+**Uppercase, extension included.** The runtime uppercases the VFS path before
+hashing. The table is sorted ascending by this key so the game can binary-search
+it.
 
-### ⚠ Correction — this does NOT extend to the archive TOC
+Verified: 36 of the 38 names harvested from the in-game manifests resolve to real
+archive entries, and all 30 NHL team codes resolve across the asset templates
+below. An independent confirmation: `crc32("LED_PIT.IFF")` selects archive entry
+#0, whose textures read "PITTSBURGH PENGUINS".
 
-An earlier draft of this report claimed the 2,407 archive entries could therefore
-be named. **That was an over-extrapolation and is wrong.** The result above was
-only ever verified *inside* the `E4791207` manifests, whose layout is
-`[u32 hash array][UTF-16BE name array]` (verified: `crc32("swedishbootup")` =
-`A7FF9656` sits in the hash array ahead of the name block).
+*Credit: this rule comes from the NHL 2K10 Mod Launcher project's findings. It is
+reproduced here because it reproduces against this archive.*
 
-Tested against the archive TOC and **all failed, 0/38**:
+### The manifest key (different!)
 
-* `crc32` of the stem / full name / uppercase / UTF-16BE encoding of either;
-* byte-swapped, bit-inverted, and `adler32` variants;
-* 19 path prefixes (`data/`, `art/`, `assets/`, `textures/`, `english/`, …) x 4
-  extensions.
+The `E4791207` manifests store `[u32 hash array][UTF-16BE name array]` keyed by
+**CRC-32 of the lowercase name with the extension stripped** — e.g.
+`crc32("swedishbootup") = 0xA7FF9656`. 5/5 exact.
 
-So the manifest key space and the archive TOC key space are **different**. The 38
-names harvested from the four manifests (files #612, #1063, #1500, #2353) are not
-archive members at all — they are resources inside packages.
+So: **manifests are lowercase-stem, the archive TOC is uppercase-with-extension.**
+Neither rule works on the other table.
 
-The archive TOC key is still a well-behaved 32-bit value (2,407 distinct, sorted
-ascending, uniformly distributed), just not a plain CRC-32 of any name form tried.
-**Naming archive entries remains an open problem.** Note the external Mod Launcher
-notes report that asset names *do* resolve "by code via the CRC TOC lookup" — if
-so, that tool is either keying a different table or applying a transform we have
-not identified; worth reconciling before trusting either account.
+### ⚠ How this was got wrong for a long time
+
+An earlier version of this document asserted the archive key was "not CRC-32 in
+any form", citing a sweep of variants that all returned 0/38 — including an
+"uppercase" case. That sweep was broken: its helper was
+
+```python
+def crc(s): return zlib.crc32(s.lower().encode()) & 0xFFFFFFFF   # note .lower()
+```
+
+so `crc(name.upper())` silently computed the *lowercase* hash. The uppercase
+variant was never actually tested, and a confident negative result was published
+on the strength of it.
+
+If a parameter sweep returns zero matches across every variant, suspect the
+harness before concluding the hypothesis space is exhausted — assert that the
+helper distinguishes the cases at all (`crc("a") != crc("A")`).
+
+### Recovering names
+
+The hash is one-way, so names are recovered by generating candidates and testing.
+Templates that resolve, with `{c}` a three-letter team code:
+
+| template | asset |
+|---|---|
+| `logo_{c}.iff` | team logo (uncompressed IFF) |
+| `uniform_{c}_{home,away,alt}.iff` | jersey overlay — numbers, logos, patches |
+| `uniform_base_{c}_{home,away,alt}.iff` | jersey base |
+| `rink_{c}.iff` | rink ice, regular season |
+| `ice_{c}_{playoffs,finals}.iff` | rink ice, postseason |
+| `led_{c}.iff` | arena LED board |
+| `zamboni_{c}.iff`, `zamboni_team_{c}.iff` | zamboni |
+| `arena_{c}.iff` | **arena scene package — textures, not audio** |
+
+Plus un-suffixed assets: `global.iff`, `overlay_static.iff`, `loading.iff`,
+`default.xex`, and the language packs (`english.iff`, `englishbootup.iff`, …).
+
+Codes: the 30 NHL clubs (`ana atl bos buf car cbj cgy chi col dal det edm fla
+lak min mtl njd nsh nyi nyr ott phi pho pit sjs stl tbl tor van wsh`) plus `int`,
+`als` and `pnd`. Brute-forcing all 17,576 three-letter combinations against the
+templates finds exactly these.
+
+That yields **443 named entries of 2,407 (18%)**. The rest need more templates —
+the method is sound, the candidate list is just incomplete.
+
+> **Correction to the external notes:** they state `arena_{code}.iff` is "audio (a
+> sound bank), not a texture". It is not — all three checked (`arena_nyr`,
+> `arena_ott`, `arena_chi`) are `FF3BEF94` texture packages of 5–7 MB, and
+> `arena_nyr.iff` is the file where all 91 textures verified byte-exact. The audio
+> banks are separately named `sfx_arena###.bnk` / `ksfx_arena###.bnk`, which is
+> the likely source of the confusion.
 
 ---
 

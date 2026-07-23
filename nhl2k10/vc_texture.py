@@ -134,14 +134,15 @@ def find_descriptor_tables(data, stride=0xE0, min_run=1, limit=None):
     return starts
 
 
-def parse_descriptor_tables(data, stride=0xE0, start=None):
+def parse_descriptor_tables(data, stride=0xE0, start=None, limit=None):
     """Parse each descriptor table separately -> list of lists.
 
     An IFF may contain SEVERAL texture groups, each with its own table AND its own
     pixel-data region; offsets restart at 0 in every table, so they must not share
     one pixel_base.
     """
-    tables = [(start, None)] if start is not None else find_descriptor_tables(data)
+    tables = ([(start, None)] if start is not None
+              else find_descriptor_tables(data, limit=limit))
     out = []
     for tstart, _run in tables:
         group = []
@@ -299,7 +300,12 @@ def describe_textures(data, bounds):
     storage order. Extraction and replacement both go through this so they can
     never disagree about where a texture lives.
     """
-    groups = parse_descriptor_tables(data)
+    # Descriptor tables live in the metadata sub-resources, never in the pixel
+    # region -- so stop the scan at the start of the last sub-resource. On a
+    # 16 MB asset that is the difference between ~2 million _entry_valid probes
+    # and a few thousand.
+    limit = bounds[-1][0] if len(bounds) >= 2 else None
+    groups = parse_descriptor_tables(data, limit=limit)
     if not groups or len(bounds) < 2:
         return []
     # Base of the FIRST texture group = EXACT start of the last sub-resource.

@@ -29,29 +29,49 @@ MAGIC = 0x0E4837C3
 HDR = 0x14
 
 def decompress_block(payload, unc, offbits):
+    """Decode one token stream.
+
+    This is the hot path for the whole toolkit -- every asset goes through it, so
+    a full-archive extraction is dominated by this loop. Two things keep it
+    reasonable in pure Python:
+
+    * A match whose offset is >= its length does not overlap its own output, so
+      it is a single slice copy rather than a per-byte loop. That is the common
+      case by a wide margin.
+    * `len(out)` is tracked in a local (`have`) instead of being recomputed on
+      every symbol.
+
+    Overlapping matches still need the byte-at-a-time path: they are how runs are
+    encoded, and the source bytes are produced as the copy proceeds.
+    """
     out = bytearray()
     i = 0
     n = len(payload)
     mask = (1 << offbits) - 1
-    while len(out) < unc and i < n:
+    have = 0
+    while have < unc and i < n:
         ctrl = payload[i]; i += 1
         if ctrl == 0:
-            out += payload[i:i+8]; i += 8
+            out += payload[i:i + 8]; i += 8; have += 8
             continue
         for b in range(8):
-            if len(out) >= unc:
+            if have >= unc:
                 break
             if (ctrl >> b) & 1:
-                tok = (payload[i] << 8) | payload[i+1]; i += 2
+                tok = (payload[i] << 8) | payload[i + 1]; i += 2
                 length = (tok >> offbits) + 3
                 offset = tok & mask
-                if offset == 0 or offset > len(out):
-                    raise ValueError("bad offset %d at out %d" % (offset, len(out)))
-                s = len(out) - offset
-                for k in range(length):
-                    out.append(out[s+k])
+                if offset == 0 or offset > have:
+                    raise ValueError("bad offset %d at out %d" % (offset, have))
+                s = have - offset
+                if offset >= length:
+                    out += out[s:s + length]          # no overlap: one slice
+                else:
+                    for k in range(length):           # overlapping run
+                        out.append(out[s + k])
+                have += length
             else:
-                out.append(payload[i]); i += 1
+                out.append(payload[i]); i += 1; have += 1
     return bytes(out)
 
 def decompress_at(data, pos):

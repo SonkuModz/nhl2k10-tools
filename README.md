@@ -1,17 +1,55 @@
-# NHL 2K10 (Xbox 360) — format documentation
+# NHL 2K10 (Xbox 360) — format documentation and tools
 
-Reverse-engineering notes on how **NHL 2K10** stores its data: the disc
-filesystem, the archive container, the compression format, and the texture and
-audio formats — plus what it takes to write modified assets back.
+How **NHL 2K10** stores its data — disc filesystem, archive container,
+compression, textures, audio — documented as a specification, with a working
+Python implementation alongside it.
 
-This is documentation, not a tool. Everything here is written as a specification
-you can implement in whatever language you like. Findings were derived from binary
-analysis and checked against ground truth; where something is unproven or wrong,
-it says so.
+The documentation is the point; the code is proof it is correct. Every finding
+was derived from binary analysis and checked against ground truth, and where
+something is unproven or wrong, it says so.
 
-No game data is included or distributed here. You need your own copy.
+> **You supply your own game.** No game data is included or distributed here.
+> These tools read a disc image you dump from a copy you own.
 
-## Start here
+## Layout
+
+```
+docs/          the findings, written to be implementable in any language
+nhl2k10/       the library — read the disc, decode, encode, write back
+research/      one-off scripts from the investigation, including the dead ends
+ghidra/        headless decompilation of the codec routines
+nhl2k10_gui.py browse, extract and replace with a UI
+```
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+```
+
+Point it at your own disc image — drop the `.iso` in this folder (it is
+git-ignored) or set `NHL2K10_ISO`. Then:
+
+```bash
+python nhl2k10_gui.py
+```
+
+or from the command line:
+
+```bash
+python nhl2k10/vc_write.py "your.iso" list-textures 18
+```
+```bash
+python nhl2k10/vc_write.py "your.iso" texture 18 3 my_art.png
+```
+```bash
+python nhl2k10/vc_write.py "your.iso" revert
+```
+
+Writes are journalled: `revert` restores the image byte-for-byte, verified by
+SHA-256 in both directions. Work on a copy anyway.
+
+## The documentation
 
 | | |
 |---|---|
@@ -22,6 +60,9 @@ No game data is included or distributed here. You need your own copy.
 | [`05_REPLACEMENT.md`](docs/05_REPLACEMENT.md) | writing assets back, and the constraints that bite |
 | [`06_EXTERNAL_NOTES.md`](docs/06_EXTERNAL_NOTES.md) | an independent project's findings, cross-checked |
 | [`file_census.csv`](docs/file_census.csv) | all 2,407 archive entries: index, size, hash, offset, magic |
+
+Module-level notes live in [`nhl2k10/README.md`](nhl2k10/README.md) and
+[`research/README.md`](research/README.md).
 
 ## The short version
 
@@ -110,9 +151,8 @@ against the *game's* data, never against your own reader.
 
 ## Legal
 
-Documentation of file formats, produced by reverse engineering for
-interoperability. Format facts are not copyrightable, and no game code or content
-is reproduced here.
+Reverse engineering for interoperability. No game code or content is reproduced
+here, and the repository ships nothing usable without your own copy of the game.
 
 Not affiliated with, endorsed by, or connected to 2K Sports, Visual Concepts,
 Take-Two Interactive or the NHL. All trademarks belong to their respective owners.

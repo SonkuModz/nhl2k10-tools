@@ -1,20 +1,37 @@
-# Documentation-only repository.
+# Allowlist policy: ignore EVERYTHING, then re-admit only our own source and
+# documentation.
 #
-# This folder also contains a 7.8 GB disc image, ~36 GB of extracted game
-# assets, third-party tools and working code. None of it belongs here, so the
-# policy is an allowlist: ignore everything, then re-admit only the docs.
+# This folder also holds a 7.8 GB disc image, ~36 GB of extracted game assets
+# and several hundred MB of third-party tools. An allowlist means none of that
+# can be committed by accident, even by `git add -A`.
 
 *
 
-!README.md
-!LICENSE
-!.gitignore
+# --- library, tools, research ---
+!nhl2k10/
+!nhl2k10/*.py
+!nhl2k10/*.md
+!research/
+!research/*.py
+!research/*.md
+!ghidra/
+!ghidra/*.py
+!ghidra/*.java
+!ghidra/*.bat
+!nhl2k10_gui.py
+
+# --- documentation ---
 !docs/
 !docs/*.md
 !docs/*.csv
+!README.md
+!LICENSE
+!requirements.txt
+!.gitignore
 
-# Explicitly, never: game data of any kind. Bring your own copy.
+# --- game data: never. Bring your own copy. ---
 *.iso
+*.iso.undo.json
 *.xex
 *.xma
 *.bnk
@@ -22,3 +39,24 @@
 *.wav
 extracted/
 preview/
+2k10*iso*extract*result/
+isoextract/
+
+# --- third-party tools: install them yourself ---
+ghidra_*_PUBLIC/
+jdk/
+QuickBMS/
+Noesis/
+iso2god-*/
+20209.3_Xenon_Recovery_with_Symbols/
+2K BMS Scripts*/
+
+# --- junk ---
+__pycache__/
+*.pyc
+*.log
+.venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

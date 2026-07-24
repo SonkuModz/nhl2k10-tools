@@ -326,6 +326,25 @@ class App(object):
         self.count_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.count_var).pack(side="right")
 
+        cat = ttk.Frame(t)
+        cat.pack(fill="x", pady=(0, 6))
+        ttk.Label(cat, text="Category:").pack(side="left")
+        self.cat_var = tk.StringVar()
+        self.cat_cb = ttk.Combobox(cat, textvariable=self.cat_var, width=20,
+                                   state="readonly",
+                                   values=(asset_names.all_categories()
+                                           if asset_names else []))
+        self.cat_cb.pack(side="left", padx=6)
+        if asset_names:
+            self.cat_cb.current(0)
+        ttk.Button(cat, text="Export category",
+                   command=self._export_category).pack(side="left", padx=4)
+        ttk.Button(cat, text="Replace from folder…",
+                   command=self._import_folder).pack(side="left")
+        ttk.Label(cat, foreground="#777",
+                  text="  export → edit the images → replace, keeping filenames"
+                  ).pack(side="left", padx=6)
+
         cols = ("idx", "name", "type", "size", "hash")
         self.tree = ttk.Treeview(t, columns=cols, show="headings",
                                  selectmode="extended")
@@ -423,6 +442,80 @@ class App(object):
                 self._logln("    %-28s %6d" % (cat, by_cat[cat]))
         if failed:
             self._logln("    %d file(s) could not be read" % failed)
+
+    # ---- category export / import ----
+    def _export_category(self):
+        if not (self.arc and asset_names and self.cat_var.get()):
+            return
+        cat = self.cat_var.get()
+        n = len(asset_names.assets_in_category(self.arc, cat, self.names))
+        if not n:
+            messagebox.showinfo("Empty", "No assets in '%s'." % cat)
+            return
+        if not messagebox.askyesno(
+                "Export category",
+                "Extract textures from %d '%s' assets into\n\n%s\n\nContinue?"
+                % (n, cat, os.path.join(self._outdir(), "textures", cat))):
+            return
+        idxs = [i for i, _nm in
+                asset_names.assets_in_category(self.arc, cat, self.names)]
+        self._start(self._do_textures, idxs, True)
+
+    def _import_folder(self):
+        """Write a folder of edited textures back, one rebuild per asset."""
+        if not HAS_WRITE:
+            messagebox.showerror("Unavailable",
+                                 "Replacing needs numpy and Pillow:\n\n"
+                                 "    pip install numpy pillow")
+            return
+        try:
+            import bulk
+        except Exception as ex:
+            messagebox.showerror("Unavailable", str(ex))
+            return
+        folder = filedialog.askdirectory(
+            title="Folder of edited textures (a category, an asset, or the "
+                  "whole textures/ tree)")
+        if not folder:
+            return
+        try:
+            plan, unknown = bulk.scan_folder(self.arc, folder, self.names)
+        except Exception as ex:
+            messagebox.showerror("Cannot scan", str(ex))
+            return
+        if not plan:
+            messagebox.showinfo(
+                "Nothing to import",
+                "No images here map back to an archive entry.\n\n"
+                "Folder names must match the asset (uniform_cgy_home) or the "
+                "archive index (01234), and filenames must keep their leading "
+                "texture number (00_...).")
+            return
+        ntex = sum(len(v) for v in plan.values())
+        msg = ("Write %d textures across %d assets into the disc image?\n\n"
+               % (ntex, len(plan)))
+        if unknown:
+            msg += "%d file(s)/folder(s) could not be mapped and will be " \
+                   "skipped.\n\n" % len(unknown)
+        msg += ("Every write is journalled, so 'Revert all mods' restores the "
+                "image byte-for-byte.")
+        if not messagebox.askyesno("Replace from folder", msg):
+            return
+        self._start(self._do_import, folder)
+
+    def _do_import(self, folder):
+        import bulk
+        self._logln("Importing from %s …" % folder)
+        r = bulk.import_folder(
+            self.iso_var.get(), folder, log=self._logln,
+            progress=lambda i, n, s: self.q.put(("prog", i)))
+        self._logln("Imported %d textures across %d files."
+                    % (r["textures"], r["files"]))
+        for f in r["failures"]:
+            self._logln("  failed: %s" % f)
+        for u in r["unresolved"][:10]:
+            self._logln("  unresolved: %s" % u)
+        self.q.put(("journal", None))
 
     def _extract_raw(self):
         idxs = self._selected()

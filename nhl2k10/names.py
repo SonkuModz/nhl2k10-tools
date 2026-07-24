@@ -172,3 +172,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def all_categories():
+    """Every folder name output_dir() can produce, for a category picker."""
+    cats = sorted({folder for _prefix, folder in CATEGORIES})
+    return cats + ["other", "unnamed"]
+
+
+def assets_in_category(arc, cat, catalog=None):
+    """-> [(archive_index, asset_name)] for one category.
+
+    'unnamed' collects every entry we cannot name; those still extract, grouped
+    by archive index.
+    """
+    catalog = catalog if catalog is not None else build_catalog()
+    out = []
+    for e in arc.files:
+        name = catalog.get(e.crc, "")
+        if category(name) == cat:
+            out.append((e.index, name))
+    return out

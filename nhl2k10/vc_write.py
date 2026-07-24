@@ -169,10 +169,15 @@ def encode_mip_chain(img, d):
     return bytes(out)
 
 
-def replace_texture(iso, file_index, tex_index, img, dry_run=False, note=None):
-    """Replace one texture inside one archive file. `img` is (h,w,4) uint8 RGBA.
+def replace_many(iso, file_index, images, dry_run=False, note=None):
+    """Replace several textures in ONE archive file in a single pass.
 
-    Returns a dict describing what was done (or would be done, if dry_run).
+    `images` maps texture index -> (h,w,4) uint8 RGBA.
+
+    Doing them one at a time recompresses the whole resource once per texture,
+    which on a multi-megabyte asset is the difference between seconds and
+    minutes. Splicing every edit into the decompressed payload first and
+    rebuilding once is otherwise identical -- same bytes, same slot check.
     """
     arc = Archive(iso)
     entry = arc.files[file_index]
@@ -183,32 +188,34 @@ def replace_texture(iso, file_index, tex_index, img, dry_run=False, note=None):
         raise ReplaceError("file #%d has no compressed blocks" % file_index)
 
     descs = V.describe_textures(dec, bounds)
-    if not 0 <= tex_index < len(descs):
-        raise ReplaceError("file #%d has %d textures, no index %d"
-                           % (file_index, len(descs), tex_index))
-    d = descs[tex_index]
-
-    payload = encode_mip_chain(img, d)
-    at = d["base"] + d["off"]
-    if at + len(payload) > len(dec):
-        raise ReplaceError("texture runs past the end of the decompressed data")
-
     new_dec = bytearray(dec)
-    new_dec[at:at + len(payload)] = payload
-    new_raw = rebuild_raw(raw, bytes(new_dec), bounds, blocks, old_dec=dec)
+    applied = []
+    for ti in sorted(images):
+        if not 0 <= ti < len(descs):
+            raise ReplaceError("file #%d has %d textures, no index %d"
+                               % (file_index, len(descs), ti))
+        d = descs[ti]
+        payload = encode_mip_chain(images[ti], d)
+        at = d["base"] + d["off"]
+        if at + len(payload) > len(new_dec):
+            raise ReplaceError("texture %d runs past the end of the payload" % ti)
+        new_dec[at:at + len(payload)] = payload
+        applied.append((ti, "%dx%d" % (d["w"], d["h"]),
+                        V.GPU_FMT[d["fmt"]][0]))
 
+    new_raw = rebuild_raw(raw, bytes(new_dec), bounds, blocks, old_dec=dec)
     info = {
-        "file": file_index, "texture": tex_index,
-        "dims": "%dx%d" % (d["w"], d["h"]),
-        "format": V.GPU_FMT[d["fmt"]][0],
+        "file": file_index,
+        "textures": [t[0] for t in applied],
+        "detail": applied,
         "orig_bytes": len(raw), "new_bytes": len(new_raw),
         "slot": entry.size, "fits": len(new_raw) <= entry.size,
     }
     if not info["fits"]:
         raise ReplaceError(
             "recompressed resource is %d bytes but the slot holds %d. The new "
-            "image compresses worse than the original; try flatter//less noisy "
-            "art. (Growing a packed resource overflows the engine's buffer.)"
+            "art compresses worse than the original; try flatter / less noisy "
+            "images. (Growing a packed resource overflows the engine's buffer.)"
             % (len(new_raw), entry.size))
 
     # pad to the original length so the TOC size field stays valid untouched
@@ -219,11 +226,23 @@ def replace_texture(iso, file_index, tex_index, img, dry_run=False, note=None):
         written = 0
         for iso_off, chunk in _iso_writes(arc, entry.offset, new_raw):
             written += p.write(iso_off, chunk,
-                               note=note or "tex f%d/#%d" % (file_index, tex_index))
+                               note=note or "tex f%d x%d" % (file_index,
+                                                             len(applied)))
         info["written"] = written
         info["journal"] = p.journal_path
     finally:
         p.close()
+    return info
+
+
+def replace_texture(iso, file_index, tex_index, img, dry_run=False, note=None):
+    """Replace a single texture. Thin wrapper over replace_many()."""
+    info = replace_many(iso, file_index, {tex_index: img},
+                        dry_run=dry_run, note=note)
+    ti, dims, fmt = info["detail"][0]
+    info["texture"] = ti
+    info["dims"] = dims
+    info["format"] = fmt
     return info
 
 

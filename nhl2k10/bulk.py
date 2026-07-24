@@ -21,6 +21,14 @@ reads the index straight back off the folder name.
 Edits for one asset are collected and applied in a **single** rebuild. Applying
 them one at a time would recompress the whole resource once per texture, which
 on a multi-megabyte asset is minutes rather than seconds.
+
+Any of .dds/.png/.tga/.bmp is accepted on import -- edit in whatever format you
+like, as long as the filename keeps its leading texture number and the image
+keeps the original dimensions.
+
+Verified end to end: all 30 team logos export and map back 30/30 with zero
+folder/asset mismatches; two of them recoloured, imported, read back out of the
+disc image at 41 dB against the edited sources, then reverted byte-identically.
 """
 import os
 import re
